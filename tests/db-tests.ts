@@ -24,17 +24,17 @@ check("vector column type on chunks", (await query<{ ok: boolean }>(
 
 // --- real DB behavior (written here so the schema contract is exercised, not just introspected) ---
 const slug = `tdd-${Date.now()}`;
-let tid: string | undefined;
+let tid: number | undefined;
 try {
-  const ins = await query<{ id: string }>(
+  const ins = await query<{ id: number }>(
     "INSERT INTO tenants (slug, name) VALUES ($1, $2) RETURNING id",
     [slug, "TDD Realness"]
   );
   tid = ins[0].id;
-  check("tenant insert returns id", typeof tid === "string" && tid.length > 0, `got ${typeof tid}`);
+  check("tenant insert returns numeric id", typeof tid === "number" && Number.isInteger(tid), `got ${typeof tid}`);
   check(
     "tenant row persists after insert",
-    (await query<{ id: string }>("SELECT id FROM tenants WHERE id = $1", [tid])).length === 1
+    (await query<{ id: number }>("SELECT id FROM tenants WHERE id = $1", [tid])).length === 1
   );
 
   try {
@@ -57,14 +57,14 @@ try {
 const txSlugs = [`tdd-tx-commit-${Date.now()}`, `tdd-tx-rollback-${Date.now()}`];
 try {
   const txId = await transaction(async (tq) => {
-    const r = await tq<{ id: string }>(
+    const r = await tq<{ id: number }>(
       "INSERT INTO tenants (slug, name) VALUES ($1, $2) RETURNING id",
       [txSlugs[0], "Tx Commit"]
     );
     return r[0].id;
   });
   check("transaction commits",
-    (await query<{ id: string }>("SELECT id FROM tenants WHERE id = $1", [txId])).length === 1);
+    (await query<{ id: number }>("SELECT id FROM tenants WHERE id = $1", [txId])).length === 1);
 
   let sawRollbackError = false;
   try {

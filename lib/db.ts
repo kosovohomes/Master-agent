@@ -1,6 +1,7 @@
-import { Pool } from "pg";
+import { Pool, types } from "pg";
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+types.setTypeParser(20, Number);
 
 export async function query<T = any>(sql: string, params: unknown[] = []): Promise<T[]> {
   const res = await pool.query(sql, params);
