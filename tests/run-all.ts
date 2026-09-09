@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 
-const files = ["tests/smoke-tests.ts", "tests/db-tests.ts", "tests/llm-tests.ts", "tests/agents-routing-tests.ts", "tests/approval-tests.ts", "tests/channels-tests.ts", "tests/rag-tests.ts", "tests/generators-tests.ts", "tests/dispatch-tests.ts"];
+const files = ["tests/smoke-tests.ts", "tests/db-tests.ts", "tests/llm-tests.ts", "tests/agents-routing-tests.ts", "tests/approval-tests.ts", "tests/channels-tests.ts", "tests/rag-tests.ts", "tests/generators-tests.ts", "tests/dispatch-tests.ts", "tests/chat-tests.ts"];
 let failures = 0;
 for (const f of files) {
   const r = spawn(process.execPath, [
