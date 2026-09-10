@@ -129,3 +129,30 @@ The seed script: creates tenant `acme-homes` → saves brand voice → ingests k
 - **A goal routed to the "wrong" agent** → the router is keyword-based: topics containing *research/news/trend* → research; *outreach/pitch/lead/sell* → sales; *promote/awareness/event* → ambassador; everything else → marketing; `channel: "chat"` → customer_service. Reword the topic to steer it.
 - **Instagram/TikTok drafts never publish** → intentional in v1; they stay `pending` until those channels go live.
 - **Channel tokens** → paste via `POST /api/v1/channels`; they are AES-256-GCM encrypted at rest, never stored in plaintext.
+
+---
+
+## 8. Ops endpoints (added 2026-09-11)
+
+All Bearer-guarded (`Authorization: Bearer <ADMIN_PASSWORD>` **or** `<OPS_TOKEN>` if set):
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /api/admin/migrate` | Applies the idempotent schema to the environment's `DATABASE_URL`. Returns applied table count (expect 11). |
+| `POST /api/admin/seed` | One-call demo bootstrap: tenant + config + RAG ingest + a real LLM draft. Optional body `{slug,name,topic,channel,knowledge}`. |
+| `GET /api/admin/env-check` | Runtime env diagnosis: presence + length per variable, never values. `DATABASE_URL` also shows scheme+host. |
+
+### Fresh-environment recovery sequence
+
+```bash
+curl -X POST https://<your-app>/api/admin/migrate  -H "Authorization: Bearer $OPS_TOKEN"
+curl -X POST https://<your-app>/api/admin/seed     -H "Authorization: Bearer $OPS_TOKEN"
+```
+
+Then open `/admin`, log in with `ADMIN_PASSWORD`, paste the returned `tenantId`, approve, schedule.
+
+### Cron on Hobby plan
+
+Vercel Hobby only allows cron **once per day**; `vercel.json` uses `30 3 * * *` accordingly.
+Force a sweep anytime: `GET /api/agents/sweep` with header `x-cron-secret: <CRON_SECRET>`.
+The route accepts both GET (cron) and POST. Upgrade to Pro to restore `*/15 * * * *`.
