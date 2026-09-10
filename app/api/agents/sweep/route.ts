@@ -22,3 +22,7 @@ export async function POST(req: Request) {
   });
   return NextResponse.json({ data: result });
 }
+
+// Vercel Cron invokes the configured path with an HTTP GET request.
+// Without this alias every scheduled sweep would fail with 405.
+export const GET = POST;
