@@ -45,7 +45,11 @@ export interface DemoSeedResult {
 export async function runDemoSeed(
   p: Partial<Omit<typeof DEMO_DEFAULTS, "knowledge">> & { knowledge?: string } = {}
 ): Promise<DemoSeedResult> {
-  const cfg = { ...DEMO_DEFAULTS, ...p };
+  const cfg = {
+    ...DEMO_DEFAULTS,
+    // strip explicit `undefined` values so they don't clobber the defaults
+    ...Object.fromEntries(Object.entries(p).filter(([, v]) => v !== undefined)),
+  };
 
   // 1. Tenant (upsert by slug)
   const [tenant] = await query<{ id: number; name: string }>(
