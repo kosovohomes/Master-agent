@@ -8,7 +8,11 @@
     "build": "next build",
     "start": "next start",
     "test": "node --env-file=.env.local node_modules/tsx/dist/cli.mjs tests/run-all.ts",
-    "migrate": "node --env-file=.env.local node_modules/tsx/dist/cli.mjs scripts/migrate.ts"
+    "migrate": "node --env-file=.env.local node_modules/tsx/dist/cli.mjs scripts/migrate.ts",
+    "seed": "node --env-file=.env.local node_modules/tsx/dist/cli.mjs scripts/seed-demo.ts"
+  },
+  "engines": {
+    "node": ">=20.9.0"
   },
   "dependencies": {
     "next": "16.3.4",
