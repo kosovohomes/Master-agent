@@ -9,14 +9,19 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     return NextResponse.json({ errors: [{ code: "UNAUTHORIZED" }] }, { status: 401 });
   }
   const draftId = Number((await params).id);
-  const body = (await req.json()) as { action?: string; comment?: string };
+  let body: { action?: string; comment?: string };
+  try {
+    body = (await req.json()) as typeof body;
+  } catch {
+    return NextResponse.json({ errors: [{ code: "INVALID_JSON" }] }, { status: 400 });
+  }
   try {
     if (body.action === "approve") await approveDraft(draftId);
     else if (body.action === "reject") await rejectDraft(draftId, body.comment ?? "");
     else if (body.action === "schedule") await scheduleDraft(draftId);
     else return NextResponse.json({ errors: [{ code: "INVALID_ACTION" }] }, { status: 400 });
     return NextResponse.json({ data: { draftId } });
-  } catch (e) {
-    return NextResponse.json({ errors: [{ code: "ACTION_FAILED", detail: String(e) }] }, { status: 400 });
+  } catch {
+    return NextResponse.json({ errors: [{ code: "ACTION_FAILED", detail: "internal error" }] }, { status: 400 });
   }
 }

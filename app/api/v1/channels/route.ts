@@ -36,6 +36,9 @@ export async function POST(req: Request) {
       meta: { ts: new Date().toISOString() },
     });
   } catch (e) {
-    return NextResponse.json({ errors: [{ code: "CHANNEL_WIREUP_FAILED", detail: String(e) }] }, { status: 500 });
+    if ((e as { code?: string }).code === "23503") {
+      return NextResponse.json({ errors: [{ code: "UNKNOWN_TENANT" }] }, { status: 404 });
+    }
+    return NextResponse.json({ errors: [{ code: "CHANNEL_WIREUP_FAILED", detail: "internal error" }] }, { status: 500 });
   }
 }

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getWidgetConfig } from "@/lib/widget";
+import { getWidgetConfig, UnknownTenantError } from "@/lib/widget";
 
 export const runtime = "nodejs";
 
@@ -10,7 +10,10 @@ export async function GET(req: Request) {
   try {
     const cfg = await getWidgetConfig(tenant);
     return NextResponse.json({ data: cfg, meta: { ts: new Date().toISOString() } });
-  } catch {
-    return NextResponse.json({ errors: [{ code: "UNKNOWN_TENANT" }] }, { status: 404 });
+  } catch (e) {
+    if (e instanceof UnknownTenantError) {
+      return NextResponse.json({ errors: [{ code: "UNKNOWN_TENANT" }] }, { status: 404 });
+    }
+    return NextResponse.json({ errors: [{ code: "CONFIG_UNAVAILABLE", detail: "internal error" }] }, { status: 500 });
   }
 }

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { sweepDue, getPublisher, type ChannelKind } from "@/lib/agents/publishers/index";
 import { decryptChannelToken } from "@/lib/channels";
+import { safeEqual } from "@/lib/security";
 
 export const runtime = "nodejs";
 
@@ -10,7 +11,7 @@ async function realPublish(p: { channel: ChannelKind; content: string; token: st
 
 export async function POST(req: Request) {
   const auth = req.headers.get("x-cron-secret");
-  if (auth !== process.env.CRON_SECRET) {
+  if (!safeEqual(auth, process.env.CRON_SECRET)) {
     return NextResponse.json({ errors: [{ code: "UNAUTHORIZED" }] }, { status: 401 });
   }
   const result = await sweepDue({

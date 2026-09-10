@@ -6,7 +6,12 @@ import type { AgentGoal } from "@/lib/agents/types";
 export const runtime = "nodejs";
 
 export async function POST(req: Request) {
-  const body = (await req.json()) as Partial<AgentGoal>;
+  let body: Partial<AgentGoal>;
+  try {
+    body = (await req.json()) as Partial<AgentGoal>;
+  } catch {
+    return NextResponse.json({ errors: [{ code: "INVALID_JSON" }] }, { status: 400 });
+  }
   if (!Number.isInteger(body.tenantId)) {
     return NextResponse.json({ errors: [{ code: "INVALID_TENANT" }] }, { status: 400 });
   }
@@ -18,7 +23,7 @@ export async function POST(req: Request) {
       context: body.context,
     });
     return NextResponse.json({ data: result, meta: { ts: new Date().toISOString() } });
-  } catch (e) {
-    return NextResponse.json({ errors: [{ code: "DISPATCH_FAILED", detail: String(e) }] }, { status: 500 });
+  } catch {
+    return NextResponse.json({ errors: [{ code: "DISPATCH_FAILED", detail: "internal error" }] }, { status: 500 });
   }
 }

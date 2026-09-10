@@ -1,5 +1,12 @@
 import { query } from "./db";
 
+export class UnknownTenantError extends Error {
+  constructor() {
+    super("unknown tenant");
+    this.name = "UnknownTenantError";
+  }
+}
+
 export interface WidgetConfig {
   tenantId: number;
   brand: string;
@@ -13,6 +20,6 @@ export async function getWidgetConfig(tenantLookup: string): Promise<WidgetConfi
       : "SELECT id, name FROM tenants WHERE slug = $1 AND status = 'active'",
     [numeric !== null ? numeric : tenantLookup]
   );
-  if (rows.length === 0) throw new Error("unknown tenant");
+  if (rows.length === 0) throw new UnknownTenantError();
   return { tenantId: rows[0].id, brand: rows[0].name };
 }
