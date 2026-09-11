@@ -2,6 +2,7 @@ import { query } from "./db";
 import { llm } from "./llm";
 import { addContentSource, ingestText } from "./rag/ingest";
 import { dispatch, getTenantConfig } from "./agents/dispatch";
+import { ensureLegacyMapping } from "./bu";
 
 /** Editable defaults for the built-in demo tenant. */
 export const DEMO_DEFAULTS = {
@@ -29,6 +30,8 @@ for 2025 handovers was 4.8 out of 5 based on 214 reviews.
 export interface DemoSeedResult {
   tenantId: number;
   tenantSlug: string;
+  businessUnitId: number;
+  websiteId: number;
   documentId: number;
   chunkCount: number;
   runId: number;
@@ -71,6 +74,11 @@ export async function runDemoSeed(
     [tenant.id, cfg.brandVoice, cfg.persona, cfg.audience]
   );
 
+  // 2b. Target-model mapping (Phase 1 M2): every legacy tenant row is
+  // represented 1:1 as a business unit + default website. Idempotent; the
+  // tenant row itself remains authoritative for legacy readers (widget).
+  const { businessUnitId, websiteId } = await ensureLegacyMapping(tenant.id);
+
   // 3. Knowledge base -> embeddings (checksum-idempotent)
   const { sourceId } = await addContentSource({ embed: llm.embed }, {
     tenantId: tenant.id, kind: "api", ref: "seed-demo",
@@ -93,6 +101,8 @@ export async function runDemoSeed(
   return {
     tenantId: tenant.id,
     tenantSlug: cfg.slug,
+    businessUnitId,
+    websiteId,
     documentId,
     chunkCount,
     runId: result.runId,

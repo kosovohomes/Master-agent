@@ -223,9 +223,13 @@ try {
   const tE = await mkTenant("t11-e", "Channel Route Tenant");
   createdTenantIds.push(tE);
   const originalToken = "oauthtoken-live-x-secret";
+  // M0 (SEC-C1): the channels route is fail-closed — authenticate with a
+  // fake legacy ops bearer for this section.
+  const FAKE_PW = `pub-ops-${Date.now()}`;
+  process.env.ADMIN_PASSWORD = FAKE_PW;
   const mkWireReq = (body: unknown) => new Request("http://localhost/api/v1/channels", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${FAKE_PW}` },
     body: JSON.stringify(body),
   });
   const w1 = await channelPOST(mkWireReq({ tenantId: tE, kind: "x", token: originalToken }));
@@ -262,9 +266,9 @@ try {
   }
   check("channels route rejects malformed wire-ups with 400", allBad);
 
-  // invalid JSON body
+  // invalid JSON body (authenticated: the M0 auth gate precedes body parsing)
   const badJsonRes = await channelPOST(new Request("http://localhost/api/v1/channels", {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: "{not json",
+    method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${FAKE_PW}` }, body: "{not json",
   }));
   check("channels route rejects unparseable body with 400", badJsonRes.status === 400);
 

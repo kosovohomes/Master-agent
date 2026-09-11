@@ -1,0 +1,65 @@
+name: CI
+
+# Phase 1 M3: typecheck + full test suite + production build.
+# Tests run against an EPHEMERAL pgvector Postgres service container —
+# never against the production Neon database. No production credentials
+# are required or used.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: agentos_ci
+          POSTGRES_PASSWORD: agentos_ci
+          POSTGRES_DB: agentos_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U agentos_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://agentos_ci:agentos_ci@localhost:5432/agentos_ci
+      CHANNEL_ENC_KEY: abc123abc123abc123abc123abc123abc123abc123abc123abc123abc123abc1
+      ADMIN_PASSWORD: ci-fake-admin-password
+      CRON_SECRET: ci-fake-cron-secret
+      OPS_TOKEN: ci-fake-ops-token
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npx tsc --noEmit --incremental false
+
+      - name: Apply versioned migrations (ephemeral DB)
+        run: npx tsx scripts/migrate.ts
+
+      - name: Test (ephemeral DB)
+        # npm test reads --env-file=.env.local; generate it for CI so the
+        # existing local workflow is preserved unchanged.
+        run: |
+          echo "DATABASE_URL=$DATABASE_URL" > .env.local
+          echo "CHANNEL_ENC_KEY=$CHANNEL_ENC_KEY" >> .env.local
+          echo "ADMIN_PASSWORD=$ADMIN_PASSWORD" >> .env.local
+          echo "CRON_SECRET=$CRON_SECRET" >> .env.local
+          echo "OPS_TOKEN=$OPS_TOKEN" >> .env.local
+          npx tsx tests/run-all.ts
+
+      - name: Production build
+        run: npm run build

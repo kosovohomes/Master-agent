@@ -1,8 +1,11 @@
 /**
- * AgentOS schema — single source of truth.
- * Used by:
- *   - scripts/migrate.ts            (local CLI:  npm run migrate)
- *   - POST /api/admin/migrate       (deployed environments, Bearer-guarded)
+ * AgentOS legacy baseline DDL (the pre-Phase-1 monolithic schema).
+ *
+ * Since Phase 1 M0 this file no longer drives migrations. It exists verbatim
+ * as migration 000's source text so the versioned ledger (lib/migrations/)
+ * is complete on a database provisioned from empty; on the live deployment
+ * these tables already exist and 000 is a no-op. New schema changes must be
+ * added as numbered migrations under lib/migrations/, never here.
  *
  * Idempotent: safe to run any number of times.
  */

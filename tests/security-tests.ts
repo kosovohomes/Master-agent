@@ -53,7 +53,12 @@ try {
   check("chunk reads are tenant-column driven", Number(leaked[0].n) >= 0);
 
   // ---------- fold-in: malformed JSON bodies must 400, never crash to HTML ----------
-  const badRun = await routeCall(() => runRoute.POST(malformedPost("/api/agents/run", { "content-type": "application/json" })));
+  // M0: agents/run is fail-closed (SEC-C2) — unauthenticated calls are 401
+  // before the body is ever parsed; the malformed-body 400 check therefore
+  // runs with the (fake) legacy ops bearer.
+  const runUnauth = await routeCall(() => runRoute.POST(malformedPost("/api/agents/run", { "content-type": "application/json" })));
+  check("run: unauthenticated -> 401 before body parse (fail closed)", runUnauth !== "THREW" && runUnauth.status === 401, typeof runUnauth === "string" ? runUnauth : `status=${(runUnauth as Response).status}`);
+  const badRun = await routeCall(() => runRoute.POST(malformedPost("/api/agents/run", auth(FAKE_PW))));
   check("run: malformed body -> 400 JSON, not a crash", badRun !== "THREW" && badRun.status === 400 && (await (badRun as Response).json()).errors?.[0]?.code === "INVALID_JSON", typeof badRun === "string" ? badRun : `status=${(badRun as Response).status}`);
 
   const badChat = await routeCall(() => chatRoute.POST(malformedPost("/api/v1/chat", { "content-type": "application/json" })));
@@ -81,19 +86,22 @@ try {
   const sw = await sweepRoute.POST(new Request("http://localhost/api/agents/sweep", { method: "POST", headers: { "x-cron-secret": "wrong-secret" } }));
   check("sweep: wrong cron secret -> 401 UNAUTHORIZED", sw.status === 401 && (await sw.json()).errors?.[0]?.code === "UNAUTHORIZED", `status=${sw.status}`);
 
-  // ---------- fold-in: channels route —— FK on unknown tenant -> 404, missing key -> 500 w/o internals ----------
-  const noTenant = await channelsRoute.POST(postJson("/api/v1/channels", { "Content-Type": "application/json" }, { tenantId: 999999999, kind: "email", token: "abc" }));
+  // ---------- fold-in: channels route —— M0 guard + FK on unknown tenant -> 404, missing key -> 500 w/o internals ----------
+  const chanUnauth = await channelsRoute.POST(postJson("/api/v1/channels", { "Content-Type": "application/json" }, { tenantId: 999999999, kind: "email", token: "abc" }));
+  check("channels: unauthenticated mutation -> 401 (SEC-C1)", chanUnauth.status === 401 && (await chanUnauth.json()).errors?.[0]?.code === "UNAUTHORIZED", `status=${chanUnauth.status}`);
+
+  const noTenant = await channelsRoute.POST(postJson("/api/v1/channels", auth(FAKE_PW), { tenantId: 999999999, kind: "email", token: "abc" }));
   check("channels: FK on unknown tenant -> 404 UNKNOWN_TENANT", noTenant.status === 404 && (await noTenant.json()).errors?.[0]?.code === "UNKNOWN_TENANT", `status=${noTenant.status}`);
 
   const savedKey = process.env.CHANNEL_ENC_KEY;
   delete process.env.CHANNEL_ENC_KEY;
-  const noKeyRes = await routeCall(() => channelsRoute.POST(postJson("/api/v1/channels", { "Content-Type": "application/json" }, { tenantId: tenantId, kind: "email", token: "abc" })));
+  const noKeyRes = await routeCall(() => channelsRoute.POST(postJson("/api/v1/channels", auth(FAKE_PW), { tenantId: tenantId, kind: "email", token: "abc" })));
   process.env.CHANNEL_ENC_KEY = savedKey;
   const noKeyBody = noKeyRes === "THREW" ? {} : (await (noKeyRes as Response).json());
   check("channels: missing enc key -> 500, internal detail not echoed", noKeyRes !== "THREW" && (noKeyRes as Response).status === 500 && noKeyBody.errors?.[0]?.code === "CHANNEL_WIREUP_FAILED" && !JSON.stringify(noKeyBody).includes("CHANNEL_ENC_KEY must"), `status=${noKeyRes === "THREW" ? "THREW" : (noKeyRes as Response).status}`);
 
   // fold-in: valid wire-up through the public route stores an encrypted token, readable via env key
-  const wire = await channelsRoute.POST(postJson("/api/v1/channels", { "Content-Type": "application/json" }, { tenantId: tenantId, kind: "email", token: "super-secret-token" }));
+  const wire = await channelsRoute.POST(postJson("/api/v1/channels", auth(FAKE_PW), { tenantId: tenantId, kind: "email", token: "super-secret-token" }));
   const wireBody = (await wire.json()) as { data?: { channelId: number } };
   check("channels: valid wire-up -> 200 channelId", wire.status === 200 && typeof wireBody.data?.channelId === "number", `status=${wire.status}`);
   const wireRow = await query<{ token_encrypted: string }>("SELECT token_encrypted FROM channels WHERE tenant_id = $1 AND kind = 'email'", [tenantId]);

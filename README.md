@@ -120,9 +120,13 @@ Duplicate `sha256` content is skipped. Only the tenant's own chunks are ever ret
 
 ## Widget embed
 
+The widget reads its configuration from **attributes on the `<script>` tag**
+(it resolves them via `document.currentScript`), and the chat API requires the
+numeric tenant id — so `data-tenant` must be the tenant **id**, not a slug:
+
 ```html
-<div data-agentos-widget data-tenant="acme-co"></div>
-<script src="https://your-host/widget.js" defer></script>
+<!-- container is optional; the widget injects its own floating UI -->
+<script data-tenant="491" data-brand="Acme Homes" src="https://your-host/widget.js" defer></script>
 ```
 
 `public/widget.js` is a self-contained, CSP-safe vanilla-JS widget (no `eval`, no inline
@@ -135,12 +139,20 @@ handlers, no network calls beyond `POST /api/v1/chat`). It renders the answer pl
 |---|---|---|---|
 | `POST /api/v1/chat` | none (public) | `{ tenantId, question }` | RAG-grounded answer + sources |
 | `GET /api/v1/widget/config` | none (public) | `?tenant=<slug-or-id>` | Public widget config: `{ tenantId, brand }` |
-| `POST /api/v1/channels` | none — **auth-free by design in v1** (see security notes) | `{ tenantId, kind, token }` | Wire up a channel token (stored AES-256-GCM encrypted) |
-| `POST /api/agents/run` | none (demo/API) | `{ tenantId, topic, channel?, context? }` | Orchestrate goal → draft (or chat) |
+| `POST /api/v1/channels` | session (`website.manage`) or `Authorization: Bearer <ADMIN_PASSWORD\|OPS_TOKEN>` during the flag-gated transition | `{ tenantId, kind, token }` | Wire up a channel token (stored AES-256-GCM encrypted) |
+| `POST /api/agents/run` | session (`agents.run`) or legacy bearer (flag-gated) | `{ tenantId, topic, channel?, context? }` | Orchestrate goal → draft (or chat); per-IP rate limit + per-tenant daily LLM cap |
 | `POST /api/agents/sweep` | `x-cron-secret` | — | Publish due scheduled drafts (run from a cron job) |
-| `POST /api/admin/login` | — | `{ password }` | Exchange `ADMIN_PASSWORD` for a session flag |
-| `GET /api/admin/drafts` | `Authorization: Bearer <ADMIN_PASSWORD>` | `?tenantId=<digits>` | List a tenant's drafts |
-| `POST /api/admin/drafts/[id]` | `Authorization: Bearer <ADMIN_PASSWORD>` | `{ action: approve\|reject\|schedule, comment? }` | Drive the approval FSM |
+| `POST /api/auth/login` | none (rate-limited + lockout) | `{ email, password }` | Email+password → httpOnly session cookie (scrypt, server-side sessions) |
+| `POST /api/auth/logout` / `GET /api/auth/me` | session cookie | — | End session / read principal |
+| `GET /api/admin/drafts` | session (`drafts.read`, BU-scoped) or legacy bearer | `?tenantId=<digits>&status=` | List drafts |
+| `POST /api/admin/drafts/[id]` | session (`drafts.approve`/`drafts.schedule`) or legacy bearer | `{ action: approve\|reject\|schedule, comment? }` | Drive the approval FSM; reviewer recorded |
+| `GET/POST/PATCH /api/admin/business-units` | session (`bu.manage`; reads for scoped staff) | — | Manage business units |
+| `GET/POST/PATCH /api/admin/websites` | session (`website.manage`) | — | Manage websites |
+| `GET/POST/PATCH /api/admin/users` | session (`users.manage`, owner-only) | — | Invite/disable users, assign roles |
+| `GET/PUT /api/admin/settings` | session (`settings.manage`) | — | Feature flags + emergency stops |
+| `GET /api/admin/audit` | session (`audit.read`) | `?limit=&action=&result=` | Audit trail viewer |
+| `POST /api/admin/bootstrap` | `Authorization: Bearer <OPS_TOKEN\|ADMIN_PASSWORD>` | `{ email, password }` | One-time first owner creation |
+| `POST /api/admin/migrate` / `POST /api/admin/seed` / `GET /api/admin/env-check` | `Authorization: Bearer <OPS_TOKEN\|ADMIN_PASSWORD>` | — | Ops: apply versioned migrations / demo seed / env diagnosis |
 
 The agreed error contract is `{ errors: [{ code, detail? }] }` with 400/401/404/409/500
 semantics per route. Malformed JSON bodies return `400 INVALID_JSON`.

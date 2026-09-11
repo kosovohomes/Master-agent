@@ -1,6 +1,6 @@
 # AgentOS — Deployment Fix & Usage Runbook
 
-**Date:** 2026-09-11 · **Repo:** `kosovohomes/Master-agent` · **Deployed at:** `agentos-nine.vercel.app`
+**Date:** 2026-09-11 · **Repo:** `kosovohomes/Master-agent` · **Deployed at:** `masteragent-nine.vercel.app` (canonical production alias)
 
 ---
 
@@ -23,7 +23,7 @@ Think of it as a **factory with a quality gate**, not a chatbot:
                  /admin: approve → schedule
                         │
                         ▼
-                 cron sweep (every 15 min) → publishes to X / LinkedIn / email
+                 cron sweep (daily, 03:30 UTC) → publishes to X / LinkedIn / email
 ```
 
 Key consequences of this design:
@@ -42,7 +42,7 @@ Three separate layers of problems, all confirmed on 2026-09-11:
 | # | Problem | Evidence | Fix |
 |---|---------|----------|-----|
 | 1 | **Vercel deployment is broken at platform level** — every path returns `500 FUNCTION_INVOCATION_FAILED`, *including static files* like `/favicon.ico` and `/widget.js` | Live probes; the same repo built locally serves `/`, `/admin`, `/admin/login` with HTTP 200 and zero env vars | §3 below |
-| 2 | **Wrong URL in circulation** — `masteragent-nine.vercel.app` returns `DEPLOYMENT_NOT_FOUND`; the real project is **`agentos-nine.vercel.app`** | Live probes (note: `masteragent.vercel.app` is a stranger's "NOSTA AI" site — not yours) | Use the correct URL |
+| 2 | **URL note** — the canonical production URL is **`masteragent-nine.vercel.app`** (Vercel project `masteragent`); older references to `agentos-nine.vercel.app` are stale | Live probes (note: `masteragent.vercel.app` is a stranger's "NOSTA AI" site — not yours) | Use the correct URL |
 | 3 | **Empty runtime data** — even once it loads, there are no tenants, so `/admin` shows nothing and widget config 404s | Handoff report: "0 tenants, 0 drafts, 0 runs (by design)" | §5 seed script |
 
 The code itself is healthy: `next build` compiles cleanly (13 routes), TypeScript passes, all 14 test suites pass locally.
@@ -78,7 +78,7 @@ Settings → Environment Variables → add **all** of these for Production + Pre
 | `CRON_SECRET` | header value for the sweep route |
 | `RESEND_API_KEY` | email provider key |
 | `EMAIL_FROM` / `EMAIL_TARGET` | sender / blast recipient |
-| `NEXT_PUBLIC_APP_URL` | `https://agentos-nine.vercel.app` |
+| `NEXT_PUBLIC_APP_URL` | `https://masteragent-nine.vercel.app` |
 
 **Important:** `NEXT_PUBLIC_APP_URL` changes between local and prod — keep it pointing at the production URL on Vercel and at `http://localhost:3000` locally.
 
@@ -104,21 +104,21 @@ The seed script: creates tenant `acme-homes` → saves brand voice → ingests k
 1. **Generate:** `POST /api/agents/run` with `{ "tenantId": <id>, "topic": "...", "channel": "linkedin" }`
 2. **Review:** open `/admin` on the deployed URL → log in with `ADMIN_PASSWORD` → paste tenant ID → **Load**
 3. **Approve → Schedule** a draft
-4. **Publish:** automatic every 15 min via cron, or force: `GET /api/agents/sweep` with header `x-cron-secret: <CRON_SECRET>`
-5. **Chat answers:** `POST /api/v1/chat` with `{ "tenantId": <id>, "message": "what is included in every home?" }` → answered strictly from your ingested text, with `sources`
+4. **Publish:** automatic daily at 03:30 UTC via cron (`vercel.json`), or force: `POST /api/agents/sweep` with header `x-cron-secret: <CRON_SECRET>`
+5. **Chat answers:** `POST /api/v1/chat` with `{ "tenantId": <id>, "question": "what is included in every home?" }` (the body key is `question`) → answered strictly from your ingested text, with `sources`
 6. **Widget:** `GET /api/v1/widget/config?tenant=<id>` → embed `public/widget.js` on any site
 
 ### API cheat sheet
 
 | Endpoint | Auth | Purpose |
 |---|---|---|
-| `POST /api/agents/run` | none (v1) | dispatch a goal → pending draft |
-| `POST /api/v1/chat` | none | RAG-grounded customer-service answer |
+| `POST /api/agents/run` | session (`agents.run`) or legacy bearer (flag-gated); per-IP + per-tenant daily cap | dispatch a goal → pending draft |
+| `POST /api/v1/chat` | none (public); per-IP rate limit + per-tenant daily cap | RAG-grounded customer-service answer |
 | `GET /api/v1/widget/config?tenant=` | none | public widget config |
-| `POST /api/v1/channels` | none (v1, documented) | store channel token (AES-GCM at rest) |
-| `GET/POST /api/admin/drafts` | `Authorization: Bearer <ADMIN_PASSWORD>` | approval queue |
-| `PATCH /api/admin/drafts/[id]` | same | approve / reject / schedule |
-| `GET /api/agents/sweep` | `x-cron-secret: <CRON_SECRET>` | publish scheduled drafts |
+| `POST /api/v1/channels` | session (`website.manage`) or legacy bearer (flag-gated) | store channel token (AES-GCM at rest) |
+| `GET/POST /api/admin/drafts` | session (`drafts.read`, BU-scoped) or legacy bearer | approval queue |
+| `POST /api/admin/drafts/[id]` | session (`drafts.approve`/`drafts.schedule`) or legacy bearer | approve / reject / schedule (reviewer recorded) |
+| `GET/POST /api/agents/sweep` | `x-cron-secret: <CRON_SECRET>` | publish scheduled drafts |
 
 ---
 

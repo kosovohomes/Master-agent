@@ -152,11 +152,15 @@ try {
     return new Response(JSON.stringify({ choices: [{ message: { content: "HTTP drafted copy" } }] }), { status: 200 });
   };
   (globalThis as any).fetch = fakeFetch;
+  // M0 (SEC-C2): agents/run is fail-closed — the route test authenticates
+  // with a fake legacy ops bearer (rate limiter + daily cap reset via env).
+  const FAKE_PW = `dispatch-ops-${Date.now()}`;
+  process.env.ADMIN_PASSWORD = FAKE_PW;
   const routeMod = await import("../app/api/agents/run/route");
 
   const mkReq = (body: unknown) => new Request("http://localhost/api/agents/run", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${FAKE_PW}` },
     body: JSON.stringify(body),
   });
 

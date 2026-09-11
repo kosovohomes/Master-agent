@@ -8,7 +8,6 @@ process.env.ADMIN_PASSWORD = FAKE_PW;
 const { authorizeAdmin, listDraftsForAdmin } = await import("../lib/admin");
 const listRoute = await import("../app/api/admin/drafts/route");
 const actionRoute = await import("../app/api/admin/drafts/[id]/route");
-const loginRoute = await import("../app/api/admin/login/route");
 const { createDraft } = await import("../lib/agents/approval");
 const { query } = await import("../lib/db");
 
@@ -117,30 +116,19 @@ try {
   const junkId = await actionRoute.POST(json(`/api/admin/drafts/${dBad}`, auth(FAKE_PW), { action: "approve" }), { params: Promise.resolve({ id: "abc" }) });
   check("POST: non-numeric draft id -> 400, no side effect", junkId.status === 400 && (await db.draftStatus(dBad)) === "pending", `status=${junkId.status}`);
 
-  // ---------- POST /api/admin/login ----------
-  const loginNone = await loginRoute.POST(json("/api/admin/login", { "Content-Type": "application/json" }, {}));
-  check("login: missing password -> 401", loginNone.status === 401, `status=${loginNone.status}`);
-  const loginBad = await loginRoute.POST(json("/api/admin/login", { "Content-Type": "application/json" }, { password: "wrong" }));
-  check("login: wrong password -> 401", loginBad.status === 401 && (await loginBad.json()).errors?.[0]?.code === "UNAUTHORIZED", `status=${loginBad.status}`);
-  const loginOk = await loginRoute.POST(json("/api/admin/login", { "Content-Type": "application/json" }, { password: FAKE_PW }));
-  check("login: correct password -> 200 ok", loginOk.status === 200 && (await loginOk.json()).data?.ok === true, `status=${loginOk.status}`);
+  // ---------- Phase 1 M1: legacy dashboard auth surface is gone ----------
+  const { existsSync } = await import("node:fs");
+  check("admin login route removed (replaced by /api/auth/login)", !existsSync("app/api/admin/login/route.ts"));
+  check("admin sessionStorage pages removed", !existsSync("app/admin/login/page.tsx") && !existsSync("app/admin/page.tsx"));
 
-  // ---------- pages as text: sessionStorage gate + Bearer flow, no eval ----------
-  const loginSrc = await readFile("app/admin/login/page.tsx", "utf8");
-  check("login page: POSTs to /api/admin/login", loginSrc.includes('fetch("/api/admin/login"'));
-  check("login page: keeps password in sessionStorage", loginSrc.includes('sessionStorage.setItem("agentos_admin_pw"'));
-  check("login page: redirects to /admin on success", loginSrc.includes('window.location.href = "/admin"'));
-  check("login page: no eval", !/\beval\s*\(|new\s+Function/i.test(loginSrc));
+  const nextConfigSrc = await readFile("next.config.ts", "utf8");
+  check("/admin bookmark redirects configured", nextConfigSrc.includes('source: "/admin"'));
 
-  const adminSrc = await readFile("app/admin/page.tsx", "utf8");
-  check("admin page: gate redirects to /admin/login when no stored password", adminSrc.includes('window.location.href = "/admin/login"') && adminSrc.includes('sessionStorage.getItem("agentos_admin_pw"'));
-  check("admin page: sends Bearer admin password on API calls", /\bAuthorization:\s*`Bearer \$\{pw\}`/.test(adminSrc));
-  check("admin page: lists drafts from /api/admin/drafts", adminSrc.includes('"/api/admin/drafts"') || adminSrc.includes("/api/admin/drafts?tenantId="));
-  check("admin page: offers approve/reject/schedule", adminSrc.includes('"approve"') && adminSrc.includes('"reject"') && adminSrc.includes('"schedule"'));
-  check("admin page: no eval", !/\beval\s*\(|new\s+Function/i.test(adminSrc));
+  const appFiles = await listAppFiles("app");
+  const appSource = (await Promise.all(appFiles.map((f) => readFile(f, "utf8")))).join("\n");
+  check("no sessionStorage password storage anywhere in app/", !appSource.includes("sessionStorage.setItem") && !appSource.includes("agentos_admin_pw"));
+  check("no client-side Bearer-password pattern in app/", !appSource.includes("Bearer ${pw}"));
 
-  const allAdminSrc = loginSrc + adminSrc;
-  check("admin pages: no PHP/JS template-injection smells", !allAdminSrc.includes("eval(") && !allAdminSrc.includes("<script"));
 } finally {
   if (createdTenantIds.length > 0) {
     await query("DELETE FROM tenants WHERE id = ANY($1)", [createdTenantIds]);
@@ -149,3 +137,14 @@ try {
 
 if (failures > 0) { console.error(`${failures} FAIL`); process.exit(1); }
 console.log("ADMIN SUITE PASS");
+async function listAppFiles(dir: string): Promise<string[]> {
+  const fs = await import("node:fs");
+  const path = await import("node:path");
+  const out: string[] = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) out.push(...(await listAppFiles(full)));
+    else if (/\.tsx?$/.test(entry.name)) out.push(full);
+  }
+  return out;
+}

@@ -1,12 +1,38 @@
+@import "tailwindcss";
+
+/*
+ * AgentOS Command Center design tokens (Phase 1 M3).
+ * Dark-sidebar admin shell; light content surface. Kept as CSS variables so
+ * a future shadcn/ui adoption can map its theme directly onto these.
+ */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #f6f7f9;
+  --foreground: #17181a;
+  --shell: #0f1420;        /* sidebar / chrome */
+  --shell-foreground: #e7eaf0;
+  --surface: #ffffff;
+  --border: #e3e6ea;
+  --muted: #6b7280;
+  --accent: #2563eb;
+  --accent-foreground: #ffffff;
+  --danger: #dc2626;
+  --ok: #15803d;
+  --warn: #b45309;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+    --background: #0b0d12;
+    --foreground: #e7eaf0;
+    --shell: #070a10;
+    --shell-foreground: #e7eaf0;
+    --surface: #141821;
+    --border: #262b36;
+    --muted: #9aa3b2;
+    --accent: #3b82f6;
+    --danger: #ef4444;
+    --ok: #22c55e;
+    --warn: #f59e0b;
   }
 }
 
@@ -28,22 +54,98 @@ body {
   background: var(--background);
   font-family: Arial, Helvetica, sans-serif;
   -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
 }
 
-* {
-  box-sizing: border-box;
-  padding: 0;
-  margin: 0;
+/* Shared form + table primitives for the Command Center (client pages). */
+.cc-input {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--foreground);
+  padding: 8px 10px;
+  font-size: 14px;
+  outline: none;
 }
-
-a {
-  color: inherit;
-  text-decoration: none;
+.cc-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent);
 }
-
-@media (prefers-color-scheme: dark) {
-  html {
-    color-scheme: dark;
-  }
+.cc-label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  margin-bottom: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
+.cc-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--foreground);
+  padding: 8px 14px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.cc-btn:hover {
+  border-color: var(--accent);
+}
+.cc-btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-foreground);
+}
+.cc-btn-danger {
+  background: transparent;
+  border-color: var(--danger);
+  color: var(--danger);
+}
+.cc-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.cc-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px;
+}
+.cc-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+.cc-table th {
+  text-align: left;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.cc-table td {
+  padding: 10px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+.cc-badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.cc-badge-ok { background: color-mix(in srgb, var(--ok) 15%, transparent); color: var(--ok); }
+.cc-badge-warn { background: color-mix(in srgb, var(--warn) 15%, transparent); color: var(--warn); }
+.cc-badge-danger { background: color-mix(in srgb, var(--danger) 15%, transparent); color: var(--danger); }
+.cc-badge-muted { background: color-mix(in srgb, var(--muted) 15%, transparent); color: var(--muted); }
