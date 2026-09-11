@@ -110,6 +110,9 @@ try {
   check("failure under max attempts → retry", fail1.outcome === "retry" && fail1.nextAttemptAt !== null);
   const tFlaky1 = (await getTask(flaky.taskId))!;
   check("retry state: queued with error recorded", tFlaky1.status === "queued" && tFlaky1.error === "boom 1" && tFlaky1.attempts === 1);
+  // backoff pushed next_run_at into the future (20s) — force it due again,
+  // the way wall-clock time would between real engine ticks
+  await query("UPDATE tasks SET next_run_at = now() WHERE id = $1", [flaky.taskId]);
   await claimNextTask("w5"); // attempts → 2
   const fail2 = await failTask(flaky.taskId, new Error("boom 2"));
   check("failure at max attempts → terminal failed", fail2.outcome === "terminal");
