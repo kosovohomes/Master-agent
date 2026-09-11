@@ -56,9 +56,14 @@ try {
   check("bucket: window expiry resets the counter", rl6.allowed && rl6.resetAt > Date.now());
   await resetRateLimits();
 
-  // clientIp: x-forwarded-for first hop wins
+  // clientIp: LAST x-forwarded-for hop wins (edge-attested; earlier hops are
+  // client-supplied and spoofable — Phase 2 hardening)
   const ipReq = new Request("http://localhost/", { headers: { "x-forwarded-for": "203.0.113.7, 10.0.0.1", "x-real-ip": "198.51.100.1" } });
-  check("clientIp: first x-forwarded-for hop", clientIp(ipReq) === "203.0.113.7");
+  check("clientIp: last x-forwarded-for hop (edge-attested)", clientIp(ipReq) === "10.0.0.1");
+  const spoofReq = new Request("http://localhost/", { headers: { "x-forwarded-for": "6.6.6.6" } });
+  check("clientIp: single-hop chain still resolves", clientIp(spoofReq) === "6.6.6.6");
+  const noXff = new Request("http://localhost/", { headers: { "x-real-ip": "198.51.100.1" } });
+  check("clientIp: x-real-ip fallback", clientIp(noXff) === "198.51.100.1");
 
   // ---------- route: login flood -> 429 ----------
   await resetRateLimits();

@@ -89,12 +89,18 @@ export async function resetRateLimits(): Promise<void> {
   }
 }
 
-/** First client IP from proxy headers (Vercel sets x-forwarded-for). */
+/**
+ * Client IP for abuse-control keys. Vercel APPENDS the edge-observed client
+ * address to any client-supplied x-forwarded-for chain, so the LAST hop is
+ * the only one the platform attests to — earlier hops are attacker-controlled
+ * and spoofable (a client could otherwise rotate fake hops to evade per-IP
+ * limits). Falls back to x-real-ip, then "unknown".
+ */
 export function clientIp(req: Request): string {
   const fwd = req.headers.get("x-forwarded-for");
   if (fwd) {
-    const first = fwd.split(",")[0]?.trim();
-    if (first) return first;
+    const hops = fwd.split(",").map((h) => h.trim()).filter(Boolean);
+    if (hops.length > 0) return hops[hops.length - 1];
   }
   return req.headers.get("x-real-ip")?.trim() || "unknown";
 }
