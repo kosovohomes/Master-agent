@@ -63,9 +63,16 @@ export async function dispatch(
 
   if (route.agent === "customer_service") {
     // Chat answers are executed by the public chat route; dispatch only
-    // records the run (legacy behavior preserved).
+    // records the run (legacy behavior preserved). prompt_hash is NOT NULL
+    // in the legacy schema: attribute the run to the agent's canonical
+    // prompt hash from the registry.
+    const csAgent = await getAgentBySlug("customer_service");
+    const csVersion = csAgent ? await currentVersion(csAgent.id) : null;
     const run = await recordRun({
       tenantId: goal.tenantId, agent: "customer_service", trigger: "manual",
+      promptHash: promptHash(csVersion?.systemPrompt ?? "unattributed-failure"),
+      agentId: csAgent?.id ?? null,
+      promptVersionId: csVersion?.id ?? null,
       topic: goal.topic, model: currentModel(),
     });
     return { runId: run.runId, agent: "customer_service", routeReason: route.reason, draftId: null };
