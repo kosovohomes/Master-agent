@@ -18,6 +18,14 @@ check("ambassador topic folds to marketing (Phase 2 \u00a76.1)", routeAgent({ to
 check("fold reason documents the ambassador fold", routeAgent({ topic: "promote our award mention", channel: "linkedin" }).reason.includes("ambassador"));
 check("default routes to marketing", routeAgent({ topic: "post about our services", channel: "x" }).agent === "marketing");
 
+// --- Phase 3 C-16: the router is an explicit classifier with a fallback flag ---
+check("matched routes are NOT fallback (chat)", routeAgent({ topic: "help me", channel: "chat" }).fallback === false);
+check("matched routes are NOT fallback (research)", routeAgent({ topic: "research the market", channel: "" }).fallback === false);
+check("matched routes are NOT fallback (sales)", routeAgent({ topic: "outreach to partners", channel: "email" }).fallback === false);
+check("matched routes are NOT fallback (ambassador fold)", routeAgent({ topic: "promote the award", channel: "x" }).fallback === false);
+check("default miss IS fallback (C-16)", routeAgent({ topic: "post about our services", channel: "x" }).fallback === true);
+check("non-matching gibberish IS fallback", routeAgent({ topic: "zzz unrelated", channel: "" }).fallback === true);
+
 // --- hard split: customer_service ONLY via chat, generation NEVER via chat ---
 check("chat beats matching intel keywords", routeAgent({ topic: "research our pricing help", channel: "chat" }).agent === "customer_service");
 check("chat beats matching outreach keywords", routeAgent({ topic: "outreach deal pricing", channel: "chat" }).agent === "customer_service");

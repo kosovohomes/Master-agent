@@ -14,6 +14,11 @@
  *   013 agent_runs run-attribution ALTERs + topic backfill (C-14) ·
  *   014 channels key-id envelope cutover point (SEC-L2) ·
  *   015 RLS scaffolding on BU/website tables (SEC-L1 v1)
+ * Phase 3 (§11 P3):
+ *   016 task engine (tasks/task_steps — durable queue, §140) ·
+ *   017 workflows/workflow_runs + scheduled_publishing_sweep seed (Workflow #1) ·
+ *   018 events/notifications (event bus + notifications v1) ·
+ *   019 content_publications (idempotent publication ledger; outbox write-stop)
  *
  * 000 records the pre-existing AgentOS baseline (the 11 legacy tables) so the
  * ledger is complete even on a database provisioned from empty. On the live
@@ -486,6 +491,170 @@ BEGIN
 END
 $rls$;`;
 
+/**
+ * Phase 3 (§11 P3) — task engine core. A durable job queue: tasks are rows,
+ * never memory. Status machine includes the approval-gated states the later
+ * content workforce phases rely on (waiting_approval, escalated). Claims use
+ * FOR UPDATE SKIP LOCKED so concurrent workers never double-claim; attempts/
+ * backoff/visibility-timeout recovery guarantee "jobs must not disappear"
+ * (§140). idempotency_key (unique per BU) is the spawn-level duplicate guard.
+ */
+const M_016_TASK_ENGINE = `
+CREATE TABLE IF NOT EXISTS tasks (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  business_unit_id BIGINT,
+  tenant_id BIGINT,
+  kind TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN
+    ('queued','claimed','running','succeeded','failed','cancelled','waiting_approval','escalated')),
+  priority INT NOT NULL DEFAULT 100,
+  payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+  result JSONB,
+  error TEXT,
+  error_class TEXT,
+  run_id BIGINT,
+  workflow_run_id BIGINT,
+  attempts INT NOT NULL DEFAULT 0,
+  max_attempts INT NOT NULL DEFAULT 3,
+  next_run_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  claimed_at TIMESTAMPTZ,
+  claimed_by TEXT,
+  heartbeat_at TIMESTAMPTZ,
+  started_at TIMESTAMPTZ,
+  finished_at TIMESTAMPTZ,
+  cancel_requested BOOLEAN NOT NULL DEFAULT false,
+  created_by TEXT NOT NULL DEFAULT 'system',
+  idempotency_key TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS tasks_idem_key
+  ON tasks (COALESCE(business_unit_id, 0), idempotency_key)
+  WHERE idempotency_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS tasks_due_idx
+  ON tasks (priority, next_run_at)
+  WHERE status = 'queued';
+CREATE INDEX IF NOT EXISTS tasks_inflight_idx
+  ON tasks (status, heartbeat_at)
+  WHERE status IN ('claimed','running');
+
+CREATE TABLE IF NOT EXISTS task_steps (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  task_id BIGINT NOT NULL REFERENCES tasks(id),
+  seq INT NOT NULL,
+  name TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','running','done','failed','skipped')),
+  output JSONB,
+  error TEXT,
+  started_at TIMESTAMPTZ,
+  finished_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS task_steps_task_idx ON task_steps (task_id, seq);`;
+
+/**
+ * Phase 3 — workflow definitions and runs. A workflow is a named trigger
+ * (schedule | event | manual; webhook + goal are reserved for later phases)
+ * bound to a task template: when triggered, the engine spawns a task row.
+ * The seeded scheduled_publishing_sweep makes the legacy cron sweep Workflow
+ * #1 (roadmap §126) while the GET alias + secret gate remain on the cron
+ * route until the engine soaks.
+ */
+const M_017_WORKFLOWS = `
+CREATE TABLE IF NOT EXISTS workflows (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  business_unit_id BIGINT,
+  slug TEXT NOT NULL,
+  name TEXT NOT NULL,
+  trigger_kind TEXT NOT NULL CHECK (trigger_kind IN ('schedule','event','manual')),
+  trigger_config JSONB NOT NULL DEFAULT '{}'::jsonb,
+  task_kind TEXT NOT NULL,
+  task_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+  enabled BOOLEAN NOT NULL DEFAULT true,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- expression unique index (table-level UNIQUE cannot take expressions)
+CREATE UNIQUE INDEX IF NOT EXISTS workflows_slug_key
+  ON workflows (COALESCE(business_unit_id, 0), slug);
+
+CREATE TABLE IF NOT EXISTS workflow_runs (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  workflow_id BIGINT NOT NULL REFERENCES workflows(id),
+  business_unit_id BIGINT,
+  trigger_kind TEXT NOT NULL,
+  trigger_ref TEXT,
+  status TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running','succeeded','failed','cancelled')),
+  task_id BIGINT,
+  stats JSONB,
+  started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  finished_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS workflow_runs_wf_idx ON workflow_runs (workflow_id, started_at DESC);
+
+INSERT INTO workflows (business_unit_id, slug, name, trigger_kind, trigger_config, task_kind, task_payload)
+SELECT NULL, 'scheduled_publishing_sweep', 'Scheduled publishing sweep', 'schedule',
+       '{"schedule": "daily 03:30 UTC"}'::jsonb, 'publishing_sweep', '{}'::jsonb
+WHERE NOT EXISTS (SELECT 1 FROM workflows WHERE slug = 'scheduled_publishing_sweep' AND business_unit_id IS NULL);`;
+
+/**
+ * Phase 3 — event bus + notifications v1. Events are append-only domain
+ * occurrences; the notification fanout (emitEvent) materializes one
+ * notifications row per rule match (terminal task/publish failures by
+ * default). Delivery rides the queue itself as send_notification tasks;
+ * suppressed when no target is configured — notifications never block work.
+ */
+const M_018_EVENTS_NOTIFICATIONS = `
+CREATE TABLE IF NOT EXISTS events (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  business_unit_id BIGINT,
+  name TEXT NOT NULL,
+  payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS events_name_idx ON events (name, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS notifications (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  business_unit_id BIGINT,
+  event_id BIGINT REFERENCES events(id),
+  channel TEXT NOT NULL DEFAULT 'email',
+  target TEXT,
+  subject TEXT,
+  body TEXT,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','sent','failed','suppressed')),
+  task_id BIGINT,
+  attempts INT NOT NULL DEFAULT 0,
+  last_error TEXT,
+  sent_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS notifications_status_idx ON notifications (status, created_at DESC);`;
+
+/**
+ * Phase 3 — content_publications replaces the outbox as the publication
+ * ledger (roadmap §205). idempotency_key is UNIQUE: one draft → at most one
+ * successful publication row, enforced by the database even under concurrent
+ * sweeps (§88). The outbox table is NOT dropped or written from here on —
+ * rows stay as archive; drop is a Phase 4 cleanup.
+ */
+const M_019_CONTENT_PUBLICATIONS = `
+CREATE TABLE IF NOT EXISTS content_publications (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  draft_id BIGINT NOT NULL,
+  business_unit_id BIGINT,
+  tenant_id BIGINT,
+  channel TEXT NOT NULL,
+  external_id TEXT,
+  idempotency_key TEXT NOT NULL UNIQUE,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','published','failed')),
+  published_at TIMESTAMPTZ,
+  attempted_at TIMESTAMPTZ,
+  error TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS content_publications_draft_idx ON content_publications (draft_id);
+CREATE INDEX IF NOT EXISTS content_publications_status_idx ON content_publications (status);`;
+
 export const MIGRATIONS: MigrationDef[] = [
   { version: "000", name: "agentos_legacy_baseline", source: M_000_LEGACY_BASELINE },
   { version: "001", name: "schema_migrations", source: M_001_SCHEMA_MIGRATIONS },
@@ -503,4 +672,8 @@ export const MIGRATIONS: MigrationDef[] = [
   { version: "013", name: "agent_runs_attributes", source: M_013_AGENT_RUNS_ATTRIBUTES },
   { version: "014", name: "channels_key_id_envelope", source: M_014_CHANNELS_KEY_ID },
   { version: "015", name: "rls_scaffolding", source: M_015_RLS_SCAFFOLDING },
+  { version: "016", name: "task_engine", source: M_016_TASK_ENGINE },
+  { version: "017", name: "workflows_runs", source: M_017_WORKFLOWS },
+  { version: "018", name: "events_notifications", source: M_018_EVENTS_NOTIFICATIONS },
+  { version: "019", name: "content_publications", source: M_019_CONTENT_PUBLICATIONS },
 ];

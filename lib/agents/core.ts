@@ -7,28 +7,35 @@ const AMBASSADOR_TERMS = ["promote", "awareness", "mention", "testimonial", "eve
 const SERVICE_CHANNELS = new Set(["chat"]);
 
 /**
- * Deterministic router (classifier v1). Phase 2 change per the Phase 0.5
- * §6.1 fold decision: `ambassador` is NOT a platform-level agent —
+ * Deterministic classifier (v2, Phase 3 per C-16). Phase 2 change per the
+ * Phase 0.5 §6.1 fold decision: `ambassador` is NOT a platform-level agent —
  * promotion/awareness topics now route to `marketing` (the content path),
  * where the ambassador persona survives as a prompt-variant config. The
  * ambassador bound executor is retained in lib/agents/executors.ts.
+ *
+ * C-16 promotion: the router is now an explicit CLASSIFIER — the default
+ * marketing route is returned with `fallback: true` so CALLERS decide what a
+ * miss means. The manual API keeps the legacy permissive default (marketing
+ * still runs); the task engine escalates on fallback instead of silently
+ * doing the wrong work. `fallback` is false for every matched route
+ * (channel/chat, research, sales, ambassador-fold).
  */
 export function routeAgent(goal: Pick<AgentGoal, "topic" | "channel">): PlanRoute {
   const t = goal.topic.toLowerCase();
 
   if (SERVICE_CHANNELS.has(goal.channel.toLowerCase())) {
-    return { agent: "customer_service", reason: "chat channel requires verified answers" };
+    return { agent: "customer_service", reason: "chat channel requires verified answers", fallback: false };
   }
   if (RESEARCH_TERMS.some((w) => t.includes(w))) {
-    return { agent: "research", reason: "topic is research/intel" };
+    return { agent: "research", reason: "topic is research/intel", fallback: false };
   }
   if (SALES_TERMS.some((w) => t.includes(w))) {
-    return { agent: "sales", reason: "topic is sales/outreach" };
+    return { agent: "sales", reason: "topic is sales/outreach", fallback: false };
   }
   if (AMBASSADOR_TERMS.some((w) => t.includes(w))) {
-    return { agent: "marketing", reason: "topic is promotion/awareness (ambassador folded to content path)" };
+    return { agent: "marketing", reason: "topic is promotion/awareness (ambassador folded to content path)", fallback: false };
   }
-  return { agent: "marketing", reason: "default marketing" };
+  return { agent: "marketing", reason: "default marketing", fallback: true };
 }
 
 export interface RunRecordParams {

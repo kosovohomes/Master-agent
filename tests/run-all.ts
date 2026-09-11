@@ -41,6 +41,10 @@ const files = [
   // Phase 2 suites
   "tests/registry-tests.ts",
   "tests/agent-executor-tests.ts",
+  // Phase 3 suites
+  "tests/task-queue-tests.ts",
+  "tests/workflow-engine-tests.ts",
+  "tests/events-tests.ts",
 ];
 let failures = 0;
 for (const f of files) {

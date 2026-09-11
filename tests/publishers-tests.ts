@@ -136,8 +136,8 @@ try {
   check("sweep posts scheduled draft", sweepRes.posted === 1 && seen.length === 1, JSON.stringify(sweepRes));
   const rows = await listDraftsByTenant(tA);
   check("draft marked posted", rows[0].status === "posted", rows[0].status);
-  const outOk = await query<{ status: string }>("SELECT status FROM outbox WHERE draft_id = $1", [draftId]);
-  check("outbox row ok on success", outOk.length === 1 && outOk[0].status === "ok", JSON.stringify(outOk));
+  const outOk = await query<{ status: string }>("SELECT status FROM content_publications WHERE draft_id = $1", [draftId]);
+  check("publication row ok on success (content_publications)", outOk.length === 1 && outOk[0].status === "published", JSON.stringify(outOk));
 
   const pendingOnly = await listDraftsByTenant(tA, "pending");
   check("no pending drafts left", pendingOnly.length === 0);
@@ -148,7 +148,7 @@ try {
   const tB = await mkTenant("t11-b", "Pub Tenant B");
   createdTenantIds.push(tB);
   await addChannelsRow(tB, "x", "x-sched-tok");
-  // one scheduled (approved) draft — still unpublished (no outbox yet)
+  // one scheduled (approved) draft — still unpublished (no publication yet)
   const { draftId: schedId } = await createDraft({ tenantId: tB, agent: "marketing", channel: "x", content: "scheduled post" });
   await approveDraft(schedId);
   await scheduleDraft(schedId);
@@ -157,19 +157,19 @@ try {
 
   check("fix: scheduled draft is unpublished before sweep",
     (await listDraftsByTenant(tB, "scheduled")).find((r) => r.id === schedId) !== undefined &&
-    (await query<{ n: string }>("SELECT count(*)::text AS n FROM outbox WHERE draft_id = $1", [schedId]))[0].n === "0");
+    (await query<{ n: string }>("SELECT count(*)::text AS n FROM content_publications WHERE draft_id = $1", [schedId]))[0].n === "0");
 
   const seenB: string[] = [];
   const sweepB = await sweepDue({ publish(p) { seenB.push(p.content); return Promise.resolve({ externalId: "b1" }); } });
   check("fix: unpublished scheduled draft IS swept", sweepB.posted === 1 && seenB.includes("scheduled post"), JSON.stringify(sweepB));
   check("fix: scheduled draft now posted",
     (await listDraftsByTenant(tB, "posted")).find((r) => r.id === schedId) !== undefined);
-  check("pending draft is not swept — still pending, no outbox",
+  check("pending draft is not swept — still pending, no publication",
     (await listDraftsByTenant(tB, "pending")).find((r) => r.id === pendId) !== undefined &&
-    (await query<{ n: string }>("SELECT count(*)::text AS n FROM outbox WHERE draft_id = $1", [pendId]))[0].n === "0");
+    (await query<{ n: string }>("SELECT count(*)::text AS n FROM content_publications WHERE draft_id = $1", [pendId]))[0].n === "0");
 
   // ==================================================================
-  // 6. publish failure -> draft failed, outbox failed, channel marked unhealthy
+  // 6. publish failure -> draft failed, publication failed, channel marked unhealthy
   // ==================================================================
   const tC = await mkTenant("t11-c", "Pub Tenant C");
   createdTenantIds.push(tC);
@@ -182,13 +182,13 @@ try {
   });
   check("failed publish bumped failed count", sweepC.failed === 1 && sweepC.posted === 0, JSON.stringify(sweepC));
   check("failed draft marked failed", (await listDraftsByTenant(tC, "failed")).find((r) => r.id === failId) !== undefined);
-  const outFail = await query<{ status: string; error: string }>("SELECT status, error FROM outbox WHERE draft_id = $1", [failId]);
-  check("failed outbox row on error", outFail.length === 1 && outFail[0].status === "failed" && outFail[0].error.includes("auth expired"), JSON.stringify(outFail));
+  const outFail = await query<{ status: string; error: string }>("SELECT status, error FROM content_publications WHERE draft_id = $1", [failId]);
+  check("failed publication row on error", outFail.length === 1 && outFail[0].status === "failed" && outFail[0].error.includes("auth expired"), JSON.stringify(outFail));
   const chState = await query<{ status: string }>("SELECT status FROM channels WHERE tenant_id = $1 AND kind = 'x'", [tC]);
   check("channel marked unhealthy after publish failure", chState[0]?.status === "unhealthy", JSON.stringify(chState));
 
   // ==================================================================
-  // 6b. email with BLANK key -> clear failure on outbox, no crash
+  // 6b. email with BLANK key -> clear failure on publication, no crash
   // ==================================================================
   const tD = await mkTenant("t11-d", "Pub Tenant D");
   createdTenantIds.push(tD);
@@ -214,8 +214,8 @@ try {
   });
   check("blank-key email publish fails cleanly (no crash)", sweepD.failed === 1, JSON.stringify(sweepD));
   check("blank-key email reached the API with empty Bearer", resendCalls === 1 && resendAuth === "Bearer ", resendAuth);
-  const eOut = await query<{ status: string; error: string }>("SELECT status, error FROM outbox WHERE draft_id = $1", [eFailId]);
-  check("blank-key email marked draft failed with outbox failed",
+  const eOut = await query<{ status: string; error: string }>("SELECT status, error FROM content_publications WHERE draft_id = $1", [eFailId]);
+  check("blank-key email marked draft failed with publication failed",
     (await listDraftsByTenant(tD, "failed")).find((r) => r.id === eFailId) !== undefined &&
     eOut.length === 1 && eOut[0].status === "failed" && eOut[0].error.includes("email publish 401"), JSON.stringify(eOut));
 
@@ -293,19 +293,19 @@ try {
   };
   const stateAfter401 = async () => {
     const d = (await listDraftsByTenant(tF)).find((r) => r.id === routeId);
-    return (await query<{ n: string }>("SELECT count(*)::text AS n FROM outbox WHERE draft_id = $1", [routeId]))[0].n === "0" &&
+    return (await query<{ n: string }>("SELECT count(*)::text AS n FROM content_publications WHERE draft_id = $1", [routeId]))[0].n === "0" &&
       d?.status === "scheduled";
   };
 
   const rWrong = await sweepPOST(mkSweepReq("definitely-wrong-secret"));
   const jWrong = await rWrong.json();
   check("sweep route 401s a wrong secret", rWrong.status === 401 && jWrong?.errors?.[0]?.code === "UNAUTHORIZED", JSON.stringify(jWrong));
-  check("401 (wrong secret) has no side effects on drafts/outbox", await stateAfter401());
+  check("401 (wrong secret) has no side effects on drafts/publications", await stateAfter401());
 
   const rAbsent = await sweepPOST(mkSweepReq(null));
   const jAbsent = await rAbsent.json();
   check("sweep route 401s an absent secret", rAbsent.status === 401 && jAbsent?.errors?.[0]?.code === "UNAUTHORIZED", JSON.stringify(jAbsent));
-  check("401 (absent secret) has no side effects on drafts/outbox", await stateAfter401());
+  check("401 (absent secret) has no side effects on drafts/publications", await stateAfter401());
 
   // correct secret: runs the sweep, route decrypts the stored token before posting
   let routePublishUrl = "";
@@ -321,7 +321,7 @@ try {
   check("sweep route runs with correct secret", rOk.status === 200 && Number.isInteger(jOk?.data?.posted), JSON.stringify(jOk));
   check("sweep route posted the due draft",
     (await listDraftsByTenant(tF, "posted")).find((r) => r.id === routeId) !== undefined &&
-    (await query<{ status: string; external_id: string }>("SELECT status, external_id FROM outbox WHERE draft_id = $1", [routeId]))[0]?.status === "ok");
+    (await query<{ status: string; external_id: string }>("SELECT status, external_id FROM content_publications WHERE draft_id = $1", [routeId]))[0]?.status === "published");
   check("route published to x endpoint", routePublishUrl === "https://api.x.com/2/tweets", routePublishUrl);
   check("route decrypted token before publishing (Bearer = plaintext, never ciphertext)",
     routeAuth === `Bearer ${routePlainTok}`, routeAuth);

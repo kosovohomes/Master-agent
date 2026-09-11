@@ -44,8 +44,10 @@ try {
   await markPosted(draftId, "ext-1");
   const rows = await listDraftsByTenant(tenantId);
   check("happy path ends posted", rows.length >= 1 && rows.find((r) => r.id === draftId)?.status === "posted");
-  const out = await query<{ channel: string }>("SELECT channel FROM outbox WHERE draft_id = $1", [draftId]);
-  check("outbox row written", out.length === 1 && out[0].channel === "x");
+  const out = await query<{ channel: string }>("SELECT channel FROM content_publications WHERE draft_id = $1", [draftId]);
+  check("publication row written (Phase 3 write-stop: content_publications)", out.length === 1 && out[0].channel === "x");
+  const outboxLeft = await query<{ n: string }>("SELECT count(*)::text AS n FROM outbox WHERE draft_id = $1", [draftId]);
+  check("outbox NOT written after Phase 3 write-stop", outboxLeft[0].n === "0");
   check("createDraft returns numeric id", typeof draftId === "number" && Number.isInteger(draftId));
 
   // reject path persists review notes + approvals audit row
@@ -86,7 +88,7 @@ try {
   check("rejected draft cannot be resurrected",
     (await listDraftsByTenant(tenantId, "rejected")).find((r) => r.id === d4)?.status === "rejected");
 
-  // failed path: scheduled -> failed writes a failed outbox row
+  // failed path: scheduled -> failed writes a failed content_publications row
   const { draftId: d5 } = await createDraft({ tenantId, agent: "marketing", channel: "linkedin", content: "will fail" });
   await approveDraft(d5);
   await scheduleDraft(d5);
@@ -94,7 +96,7 @@ try {
   const d5row = (await listDraftsByTenant(tenantId, "failed")).find((r) => r.id === d5);
   check("failed path: draft marked failed",
     d5row?.status === "failed" &&
-    (await query<{ status: string }>("SELECT status FROM outbox WHERE draft_id = $1", [d5]))[0].status === "failed");
+    (await query<{ status: string }>("SELECT status FROM content_publications WHERE draft_id = $1", [d5]))[0].status === "failed");
 
   // tenant scoping: tenant A must never see tenant B's drafts
   const tb = await query<{ id: number }>(`INSERT INTO tenants (slug, name) VALUES ($1, $2) RETURNING id`, [slugB, "Scope Test B"]);

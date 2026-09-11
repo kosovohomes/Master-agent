@@ -66,13 +66,25 @@ export async function scheduleDraft(draftId: number, _actor?: ReviewerRef): Prom
   await transition(draftId, "scheduled");
 }
 
+/**
+ * Phase 3 write-stop (§205): publications land in content_publications
+ * (idempotency_key UNIQUE per draft) instead of the outbox. The outbox
+ * becomes an archive — no new rows from here on; drop is Phase 4 cleanup.
+ * UPSERT semantics: the engine's publishing_sweep pre-inserts a pending
+ * claim row BEFORE the external side effect; markPosted then finalizes that
+ * same row. Legacy callers (no claim row) insert fresh.
+ */
 export async function markPosted(draftId: number, externalId: string): Promise<void> {
   const d = await query<{ tenant_id: number; channel: string }>("SELECT tenant_id, channel FROM drafts WHERE id = $1", [draftId]);
   await transition(draftId, "posted");
   await query(
-    `INSERT INTO outbox (draft_id, tenant_id, channel, external_id, status)
-     VALUES ($1, $2, $3, $4, 'ok')`,
-    [draftId, d[0].tenant_id, d[0].channel, externalId]
+    `INSERT INTO content_publications
+       (draft_id, tenant_id, channel, external_id, idempotency_key, status, published_at, attempted_at)
+     VALUES ($1, $2, $3, $4, $5, 'published', now(), now())
+     ON CONFLICT (idempotency_key) DO UPDATE
+       SET status = 'published', external_id = EXCLUDED.external_id,
+           published_at = now(), attempted_at = now(), error = NULL`,
+    [draftId, d[0].tenant_id, d[0].channel, externalId, `draft:${draftId}`]
   );
 }
 
@@ -80,9 +92,12 @@ export async function markFailed(draftId: number, error: string): Promise<void> 
   const d = await query<{ tenant_id: number; channel: string }>("SELECT tenant_id, channel FROM drafts WHERE id = $1", [draftId]);
   await transition(draftId, "failed");
   await query(
-    `INSERT INTO outbox (draft_id, tenant_id, channel, status, error)
-     VALUES ($1, $2, $3, 'failed', $4)`,
-    [draftId, d[0].tenant_id, d[0].channel, error]
+    `INSERT INTO content_publications
+       (draft_id, tenant_id, channel, idempotency_key, status, error, attempted_at)
+     VALUES ($1, $2, $3, $4, 'failed', $5, now())
+     ON CONFLICT (idempotency_key) DO UPDATE
+       SET status = 'failed', error = EXCLUDED.error, attempted_at = now()`,
+    [draftId, d[0].tenant_id, d[0].channel, `draft:${draftId}`, error.slice(0, 2000)]
   );
 }
 
