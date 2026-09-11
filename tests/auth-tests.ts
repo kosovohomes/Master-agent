@@ -1,4 +1,5 @@
 import { query } from "../lib/db";
+import { resetRateLimits } from "../lib/security/ratelimit";
 import { hashPassword, verifyPassword, generateInitialPassword } from "../lib/auth/password";
 import { SESSION_COOKIE, SESSION_TTL_MS, hashToken } from "../lib/auth/sessions";
 
@@ -38,6 +39,7 @@ async function countSessions(userId: number): Promise<number> {
 }
 
 try {
+  await resetRateLimits(); // DB-backed buckets persist across suite processes
   // ---------- scrypt password hashing (per-user salt, node:crypto) ----------
   const pw = "correct horse battery";
   const h1 = await hashPassword(pw);

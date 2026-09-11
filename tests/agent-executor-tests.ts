@@ -92,7 +92,7 @@ try {
   const mktVersion = mkt ? await currentVersion(mkt.id) : null;
   check("run attribution: agent_id + prompt_version_id + model recorded",
     runRow.agent_id === mkt?.id && runRow.prompt_version_id === mktVersion?.id && runRow.model === "gpt-4o-mini");
-  check("run attribution: topic column carries the goal topic (C-14)", runRow.topic === "probe");
+  check("run attribution: topic column carries the goal topic (C-14)", runRow.topic === "welcome new visitors");
   check("run attribution: timing recorded", runRow.started_at != null && runRow.completed_at != null && (runRow.duration_ms ?? -1) >= 0);
   check("run attribution: output_ref points at the draft", runRow.output_ref === `drafts/${res.draftId}`);
   check("run attribution: prompt_hash = sha-256 of the rendered system prompt (golden)",

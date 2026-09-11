@@ -1,4 +1,5 @@
 import { query } from "../lib/db";
+import { resetRateLimits } from "../lib/security/ratelimit";
 import { writeAudit, sanitizeMetadata } from "../lib/audit";
 import { hashPassword } from "../lib/auth/password";
 import { createSession, SESSION_COOKIE } from "../lib/auth/sessions";
@@ -37,6 +38,7 @@ async function latestAudit(action: string): Promise<any | null> {
 }
 
 try {
+  await resetRateLimits(); // DB-backed buckets persist across suite processes
   const FAKE_PW = `audit-ops-${stamp}`;
   process.env.ADMIN_PASSWORD = FAKE_PW;
 

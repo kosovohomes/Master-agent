@@ -1,4 +1,5 @@
 import assert from "node:assert";
+import { resetRateLimits } from "../lib/security/ratelimit";
 import { getPublisher, sweepDue } from "../lib/agents/publishers/index";
 import {
   createDraft, approveDraft, scheduleDraft, listDraftsByTenant,
@@ -33,6 +34,7 @@ const addChannelsRow = async (tenantId: number, kind: string, plainToken: string
 };
 
 try {
+  await resetRateLimits(); // DB-backed buckets persist across suite processes
   // ==================================================================
   // 1. Email publisher posts to Resend-style API with injected fetch (brief verbatim)
   // ==================================================================
@@ -239,7 +241,7 @@ try {
   check("channels route never echoes the plaintext token", !wireJson.includes(originalToken));
   const encRows = await query<{ token_encrypted: string }>("SELECT token_encrypted FROM channels WHERE tenant_id = $1 AND kind = 'x'", [tE]);
   check("channels route stores ciphertext, never plaintext",
-    encRows.length === 1 && encRows[0].token_encrypted !== originalToken && /^[0-9a-f]+:[0-9a-f]+:[0-9a-f]+$/.test(encRows[0].token_encrypted), encRows[0].token_encrypted);
+    encRows.length === 1 && encRows[0].token_encrypted !== originalToken && /^(v2:[^:]+:)?[0-9a-f]+:[0-9a-f]+:[0-9a-f]+$/.test(encRows[0].token_encrypted), encRows[0].token_encrypted);
   check("channels route round-trip decrypts to original token",
     decryptChannelToken(encRows[0].token_encrypted) === originalToken);
 

@@ -1,4 +1,5 @@
 import assert from "node:assert";
+import { resetRateLimits } from "../lib/security/ratelimit";
 import { encryptChannelToken, decryptChannelToken } from "../lib/channels";
 import { query } from "../lib/db";
 import { safeEqual } from "../lib/security";
@@ -38,6 +39,7 @@ async function routeCall(fn: () => Promise<Response>): Promise<Response | "THREW
 const createdTenantIds: number[] = [];
 
 try {
+  await resetRateLimits(); // DB-backed buckets persist across suite processes
   // ---------- brief (base) checks: channel tokens never stored in plaintext ----------
   const t = await query<{ id: number }>(`INSERT INTO tenants (slug, name) VALUES ($1, $2) RETURNING id`, [`t-sec-${Date.now()}`, "Sec Co"]);
   const tenantId = t[0].id;

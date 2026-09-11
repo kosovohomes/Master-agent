@@ -130,6 +130,9 @@ export async function dispatch(
       businessUnitId,
       trigger: "manual",
       status: "failed",
+      // prompt_hash is NOT NULL in the legacy schema — attribute the failure
+      // to the agent's canonical prompt hash even when execution never ran.
+      promptHash: promptHash(version?.systemPrompt ?? "unattributed-failure"),
       promptVersionId: version?.id ?? null,
       topic: goal.topic,
       model: currentModel(),

@@ -1,4 +1,5 @@
 import { dispatch, getTenantConfig } from "../lib/agents/dispatch";
+import { resetRateLimits } from "../lib/security/ratelimit";
 import type { TenantCfg } from "../lib/agents/dispatch";
 import { query } from "../lib/db";
 import type { LLMClient } from "../lib/llm";
@@ -27,6 +28,7 @@ const draftsFor = async (t: number) => query<{ id: number }>("SELECT id FROM dra
 const runsFor = async (t: number) => query<{ id: number }>("SELECT id FROM agent_runs WHERE tenant_id = $1", [t]);
 
 try {
+  await resetRateLimits(); // DB-backed buckets persist across suite processes
   const [ta] = await query<{ id: number }>(
     `INSERT INTO tenants (slug, name) VALUES ($1, $2) RETURNING id`, [slugA, "Dispatch Tenant A"]);
   const [tb] = await query<{ id: number }>(

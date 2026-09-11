@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { resetRateLimits } from "../lib/security/ratelimit";
 
 // Fake admin password BEFORE loading any admin module so no real .env.local
 // value is compared, printed, or leaked to test output.
@@ -30,6 +31,7 @@ const stamp = Date.now();
 const createdTenantIds: number[] = [];
 
 try {
+  await resetRateLimits(); // DB-backed buckets persist across suite processes
   // ---------- pure auth helper (env injection seam) ----------
   check("authorizeAdmin: fake token accepted", authorizeAdmin(FAKE_PW) === true);
   check("authorizeAdmin: null token rejected", authorizeAdmin(null) === false);

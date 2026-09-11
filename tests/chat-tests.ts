@@ -1,4 +1,5 @@
 import { answerChat } from "../lib/agents/chat";
+import { resetRateLimits } from "../lib/security/ratelimit";
 import { retrieve } from "../lib/rag/retrieve";
 import { addContentSource, ingestText } from "../lib/rag/ingest";
 import { POST } from "../app/api/v1/chat/route";
@@ -30,6 +31,7 @@ const mkTenant = async (slug: string, name: string): Promise<number> => {
 const createdTenantIds: number[] = [];
 
 try {
+  await resetRateLimits(); // DB-backed buckets persist across suite processes
   // ---------- unit path: fake retrieve + stub LLM (deterministic, no DB reads) ----------
   const unitTenantId = await mkTenant("t7-chat-unit", "Chat Unit");
   createdTenantIds.push(unitTenantId);

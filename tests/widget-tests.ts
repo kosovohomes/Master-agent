@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { resetRateLimits } from "../lib/security/ratelimit";
 import { existsSync } from "node:fs";
 import { getWidgetConfig } from "../lib/widget";
 import { GET } from "../app/api/v1/widget/config/route";
@@ -14,6 +15,7 @@ const stamp = Date.now();
 const createdTenantIds: number[] = [];
 
 try {
+  await resetRateLimits(); // DB-backed buckets persist across suite processes
   // ---------- config resolution: slug + numeric id ----------
   const [t] = await query<{ id: number; slug: string }>(
     `INSERT INTO tenants (slug, name) VALUES ($1, $2) RETURNING id, slug`,

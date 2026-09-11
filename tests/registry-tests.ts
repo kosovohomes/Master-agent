@@ -90,13 +90,12 @@ try {
   check("re-enabled agent is runnable again", (await checkRunnable("research", null)).ok);
 
   // ---------- kill-switch flag ----------
-  const flagKey = `disable_agent:research-test-${stamp}`;
+  const flagKey = "disable_agent:marketing";
   createdFlagKeys.push(flagKey);
   await query(
     `INSERT INTO feature_flags (key, enabled, emergency, description) VALUES ($1, true, true, 'test kill switch') ON CONFLICT (key) DO UPDATE SET enabled = true`,
-    [flagKey.replace("research-test", "marketing")] // flag must match a real slug; use marketing
+    [flagKey]
   );
-  createdFlagKeys.push(`disable_agent:marketing`);
   const flagged = await checkRunnable("marketing", null);
   check("kill-switch flag blocks even an active agent", !flagged.ok && flagged.code === "AGENT_KILL_SWITCH");
   await setFeatureFlag("disable_agent:marketing", false, null);
