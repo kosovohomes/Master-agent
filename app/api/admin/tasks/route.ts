@@ -59,22 +59,30 @@ export async function POST(req: Request) {
   if (!kind || !knownTaskKinds().includes(kind)) {
     return NextResponse.json({ errors: [{ code: "UNKNOWN_TASK_KIND", detail: knownTaskKinds() }] }, { status: 400 });
   }
-  if (kind === "agent_dispatch" && !Number.isInteger(body.tenantId)) {
+  // Nested payload wins when provided; otherwise build one from top-level
+  // fields (agent_dispatch convenience shape).
+  const nested = (body.payload && typeof body.payload === "object")
+    ? (body.payload as Record<string, unknown>)
+    : null;
+  const tenantId = Number.isInteger(body.tenantId)
+    ? (body.tenantId as number)
+    : Number.isInteger(nested?.tenantId)
+      ? (nested!.tenantId as number)
+      : null;
+  if (kind === "agent_dispatch" && tenantId == null) {
     return NextResponse.json({ errors: [{ code: "INVALID_TENANT" }] }, { status: 400 });
   }
 
-  const payload = (body.payload && typeof body.payload === "object")
-    ? body.payload as Record<string, unknown>
-    : {
-        tenantId: body.tenantId,
-        topic: body.topic,
-        channel: body.channel,
-        context: body.context,
-        allowFallback: body.allowFallback,
-      };
+  const payload = nested ?? {
+    tenantId: body.tenantId,
+    topic: body.topic,
+    channel: body.channel,
+    context: body.context,
+    allowFallback: body.allowFallback,
+  };
 
   const spawn = await spawnTask({
-    tenantId: Number.isInteger(body.tenantId) ? (body.tenantId as number) : null,
+    tenantId,
     kind,
     payload,
     idempotencyKey: typeof body.idempotencyKey === "string" ? body.idempotencyKey : null,

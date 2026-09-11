@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { listWorkflows, triggerWorkflow } from "@/lib/tasks/engine";
 import type { WorkflowRow } from "@/lib/tasks/engine";
+import { settleWorkflowRun } from "@/lib/tasks/engine";
 import { requirePermission } from "@/lib/auth/guards";
 import { query } from "@/lib/db";
 import { writeAudit, requestIdFor } from "@/lib/audit";
@@ -40,8 +41,22 @@ export async function GET(req: Request) {
      FROM workflow_runs wr JOIN workflows w ON w.id = wr.workflow_id
      ORDER BY wr.id DESC LIMIT 50`
   );
+  // Lazy-settle: runs whose task reached a terminal state but whose row was
+  // never settled (manual trigger + out-of-band tick) self-heal on read.
+  for (const r of runs) {
+    if (r.status === "running" && Number.isInteger(r.task_id)) {
+      await settleWorkflowRun(r.id as number).catch(() => undefined);
+    }
+  }
+  const freshRuns = runs.some((r) => r.status === "running")
+    ? await query<Record<string, unknown>>(
+        `SELECT wr.*, w.slug AS workflow_slug
+         FROM workflow_runs wr JOIN workflows w ON w.id = wr.workflow_id
+         ORDER BY wr.id DESC LIMIT 50`
+      )
+    : runs;
   return NextResponse.json({
-    data: { workflows: workflows.map(mapWorkflow), runs: runs.map(mapRun) },
+    data: { workflows: workflows.map(mapWorkflow), runs: freshRuns.map(mapRun) },
     meta: { requestId },
   });
 }
