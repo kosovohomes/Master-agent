@@ -318,7 +318,13 @@ try {
   (globalThis as any).fetch = routeFetch;
   const rOk = await sweepPOST(mkSweepReq(process.env.CRON_SECRET!));
   const jOk = await rOk.json();
-  check("sweep route runs with correct secret", rOk.status === 200 && Number.isInteger(jOk?.data?.posted), JSON.stringify(jOk));
+  check("sweep route runs with correct secret",
+    rOk.status === 200 && (
+      // Phase 3 engine mode: trigger + tick result
+      (jOk?.data?.mode === "engine" && Number.isInteger(jOk?.data?.tick?.succeeded)) ||
+      // legacy rollback mode (legacy_sweep_direct flag): {posted, failed}
+      Number.isInteger(jOk?.data?.posted)
+    ), JSON.stringify(jOk));
   check("sweep route posted the due draft",
     (await listDraftsByTenant(tF, "posted")).find((r) => r.id === routeId) !== undefined &&
     (await query<{ status: string; external_id: string }>("SELECT status, external_id FROM content_publications WHERE draft_id = $1", [routeId]))[0]?.status === "published");

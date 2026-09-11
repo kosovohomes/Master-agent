@@ -79,9 +79,12 @@ try {
   races.filter((r) => r.created).forEach((r) => trackTask(r.taskId));
   check("5 concurrent spawns with same key → exactly 1 created", races.filter((r) => r.created).length === 1, JSON.stringify(races));
   check("all concurrent spawns agree on the taskId", new Set(races.map((r) => r.taskId)).size === 1);
+  // retire the raced task so it cannot win claims intended for later tasks
+  await cancelTask(races.find((r) => r.created)!.taskId, "suite");
 
   // ---------- claim mechanics ----------
-  const due = await spawnTask({ tenantId: tenantA, kind: "noop_probe", createdBy: "suite-claim" });
+  // priority 1: beats any older same-priority stragglers in the shared CI DB
+  const due = await spawnTask({ tenantId: tenantA, kind: "noop_probe", createdBy: "suite-claim", priority: 1 });
   trackTask(due.taskId);
   const worker1 = `w1-${Date.now()}`;
   const claimed = await claimNextTask(worker1);
