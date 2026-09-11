@@ -122,6 +122,36 @@ The seed script: creates tenant `acme-homes` → saves brand voice → ingests k
 
 ---
 
+## 7. Ops endpoints
+
+All Bearer-guarded (`Authorization: Bearer <OPS_TOKEN>` or `<ADMIN_PASSWORD>`); every call is audit-logged:
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /api/admin/migrate` | Applies the **versioned migration ledger** (`lib/migrations/`) — ordered, idempotent, re-runnable. |
+| `POST /api/admin/seed` | One-call demo bootstrap: tenant + mapped business unit + website + RAG ingest + a real LLM draft. Optional body `{slug,name,topic,channel,knowledge}`. |
+| `GET /api/admin/env-check` | Runtime env diagnosis: presence + length per variable, never values. `DATABASE_URL` also shows scheme+host. |
+| `POST /api/admin/bootstrap` | **One-time** creation of the first owner user (`{email,password}`); refuses with 409 once any user exists. |
+
+### Fresh-environment recovery sequence
+
+```bash
+curl -X POST https://<your-app>/api/admin/migrate   -H "Authorization: Bearer $OPS_TOKEN"
+curl -X POST https://<your-app>/api/admin/bootstrap -H "Authorization: Bearer $OPS_TOKEN" \
+     -H "Content-Type: application/json" -d '{"email":"owner@yourdomain.com","password":"<min 10 chars>"}'
+curl -X POST https://<your-app>/api/admin/seed      -H "Authorization: Bearer $OPS_TOKEN"
+```
+
+Then open `/login`, sign in with the bootstrap email/password, and manage business units, websites, approvals, audit, and settings from the Command Center.
+
+### Cron on Hobby plan
+
+Vercel Hobby only allows cron **once per day**; `vercel.json` uses `30 3 * * *` accordingly.
+Force a sweep anytime: `POST /api/agents/sweep` with header `x-cron-secret: <CRON_SECRET>`.
+The route accepts both GET (cron) and POST. Upgrade to Pro to restore `*/15 * * * *`.
+
+---
+
 ## 7. FAQ
 
 - **Widget config returns 404** → that tenant ID doesn't exist. Seed it first (§5). Correct behavior, not a bug.
