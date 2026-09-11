@@ -38,6 +38,9 @@ const files = [
   "tests/ratelimit-tests.ts",
   "tests/audit-tests.ts",
   "tests/bu-website-tests.ts",
+  // Phase 2 suites
+  "tests/registry-tests.ts",
+  "tests/agent-executor-tests.ts",
 ];
 let failures = 0;
 for (const f of files) {

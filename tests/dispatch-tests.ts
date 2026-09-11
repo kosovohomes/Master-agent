@@ -44,10 +44,9 @@ try {
   check("config loads brand voice from tenant row", cfgA.brandVoice === "clear and direct");
   check("config loads persona from tenant row", cfgA.persona === "city lawyer");
   check("config loads audience from tenant row", cfgA.audience === "small businesses");
-  check("config exposes empty content system prompt default", cfgA.contentSystemPrompt === "");
   const missing = await getTenantConfig(999999999);
   check("unknown tenant config returns empty defaults",
-    missing.brandVoice === "" && missing.persona === "" && missing.audience === "" && missing.contentSystemPrompt === "");
+    missing.brandVoice === "" && missing.persona === "" && missing.audience === "");
 
   // --- dispatch routes a default marketing goal and records run + pending draft ---
   completeCalls = 0;
@@ -59,11 +58,17 @@ try {
   check("draftId is numeric", Number.isInteger(res.draftId));
   check("run recorded", (await query<{ id: number }>("SELECT id FROM agent_runs WHERE id = $1", [res.runId])).length === 1);
   check("draft created", (await query<{ id: number }>("SELECT id FROM drafts WHERE id = $1", [res.draftId!])).length === 1);
-  const mktRun = (await query<{ agent: string; trigger: string; status: string; prompt_hash: string; tenant_id: number }>(
-    "SELECT agent, trigger, status, prompt_hash, tenant_id FROM agent_runs WHERE id = $1", [res.runId]))[0];
-  check("run row is marketing/completed/manual with topic hash and tenant",
+  const mktRun = (await query<{ agent: string; trigger: string; status: string; prompt_hash: string; tenant_id: number; agent_id: number | null; prompt_version_id: number | null; model: string | null; topic: string | null; duration_ms: number | null }>(
+    "SELECT agent, trigger, status, prompt_hash, tenant_id, agent_id, prompt_version_id, model, topic, duration_ms FROM agent_runs WHERE id = $1", [res.runId]))[0];
+  check("run row is marketing/completed/manual for the tenant",
     mktRun.agent === "marketing" && mktRun.status === "completed" && mktRun.trigger === "manual" &&
-    mktRun.prompt_hash === "post about our services" && mktRun.tenant_id === tenantA);
+    mktRun.tenant_id === tenantA);
+  check("run attribution: real sha-256 prompt hash (not the raw topic)",
+    /^[0-9a-f]{64}$/.test(mktRun.prompt_hash) && mktRun.prompt_hash !== "post about our services");
+  check("run attribution: registry agent_id, version, model, topic, timing",
+    Number.isInteger(mktRun.agent_id as number) && Number.isInteger(mktRun.prompt_version_id as number) &&
+    mktRun.model === "gpt-4o-mini" && mktRun.topic === "post about our services" &&
+    Number.isInteger(mktRun.duration_ms as number));
   const mktDraft = (await query<{ agent: string; channel: string; status: string; tenant_id: number }>(
     "SELECT agent, channel, status, tenant_id FROM drafts WHERE id = $1", [res.draftId!]))[0];
   check("draft is pending marketing/x for the tenant", mktDraft.agent === "marketing" && mktDraft.channel === "x" &&
@@ -100,10 +105,14 @@ try {
   completeCalls = 0;
   const rAmb = await dispatch({ llm: stubLLM, getConfig: getTenantConfig },
     { tenantId: tenantA, topic: "promote our awards night", channel: "x" });
-  check("routes to ambassador", rAmb.agent === "ambassador");
-  check("ambassador draft is pending ambassador/x",
+  // Phase 2 fold (§6.1): ambassador is not a registry agent — promotion/
+  // awareness topics route to the marketing (content) path.
+  check("ambassador topic folds to marketing", rAmb.agent === "marketing");
+  check("fold reason is surfaced",
+    rAmb.routeReason.includes("ambassador") && rAmb.routeReason.includes("fold"));
+  check("folded-topic draft is pending marketing/x",
     (await query<{ agent: string; status: string }>(
-      "SELECT agent, status FROM drafts WHERE id = $1", [rAmb.draftId!]))[0].agent === "ambassador" &&
+      "SELECT agent, status FROM drafts WHERE id = $1", [rAmb.draftId!]))[0].agent === "marketing" &&
     (await query<{ status: string }>("SELECT status FROM drafts WHERE id = $1", [rAmb.draftId!]))[0].status === "pending");
 
   // --- binding flag: customer_service is guarded before generators (chat-first, no LLM) ---

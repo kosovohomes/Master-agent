@@ -12,6 +12,7 @@ export default async function DashboardLayout({ children }: { children: React.Re
 
   const links: { href: string; label: string; show: boolean }[] = [
     { href: "/dashboard", label: "Dashboard", show: true },
+    { href: "/agents", label: "Agents", show: perms.has("drafts.read") || perms.has("agents.manage") || perms.has("agents.run") },
     { href: "/websites", label: "Websites", show: perms.has("bu.manage") || perms.has("website.manage") || perms.has("drafts.read") },
     { href: "/approvals", label: "Approvals", show: perms.has("drafts.read") },
     { href: "/audit", label: "Audit", show: perms.has("audit.read") },

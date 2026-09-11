@@ -24,7 +24,7 @@ export function systemPromptFor(agent: GenAgent, config: {
   ].join("\n");
 }
 
-function channelHint(channel: string): string {
+export function channelHint(channel: string): string {
   const hints: Record<string, string> = {
     x: "Max 280 characters, 1-2 hashtags max, no link shorteners.",
     linkedin: "Professional tone, 3-5 short paragraphs, end with a soft call to action.",

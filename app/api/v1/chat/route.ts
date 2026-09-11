@@ -25,7 +25,7 @@ export async function POST(req: Request) {
   const requestId = requestIdFor(req);
   const ip = clientIp(req);
 
-  const rl = rateLimit(`chat:${ip}`, 10, 60 * 1000);
+  const rl = await rateLimit(`chat:${ip}`, 10, 60 * 1000);
   if (!rl.allowed) {
     await writeAudit({ actorType: "anonymous", actorLabel: "ip", action: "chat.answer", resource: "chat", result: "denied", requestId, ip, metadata: { reason: "rate_limited" } });
     return NextResponse.json({ errors: [{ code: "RATE_LIMITED" }] }, { status: 429, headers: { "Retry-After": String(rl.retryAfterSec) } });

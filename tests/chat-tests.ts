@@ -16,7 +16,7 @@ const dim = (n: number) => Array.from({ length: 1536 }, (_, i) => (i < n ? 1 : 0
 const fakeEmbed = async (texts: string[]): Promise<number[][]> =>
   texts.map((_, i) => dim(10 + i));
 
-const cfg: TenantCfg = { brandVoice: "courteous", persona: "assistant", audience: "customers", contentSystemPrompt: "" };
+const cfg: TenantCfg = { brandVoice: "courteous", persona: "assistant", audience: "customers" };
 
 const stamp = Date.now();
 const mkTenant = async (slug: string, name: string): Promise<number> => {

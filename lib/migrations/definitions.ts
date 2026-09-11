@@ -7,6 +7,13 @@
  *   006 tenant_usage_daily · 007 business_units + websites (+1:1 backfill) ·
  *   008 website_integrations, website_capabilities (structure only) ·
  *   009 channels ADD target/metadata/display_name · 010 approvals ADD reviewer_user_id
+ * Phase 2 (§11 P2 / §5.2):
+ *   011 rate_limit_buckets (DB-backed limiter pull-forward) ·
+ *   012 agents registry (agents/agent_versions/agent_tools/agent_permissions/
+ *       business_unit_agents/agent_identities + registry seed + agents.manage) ·
+ *   013 agent_runs run-attribution ALTERs + topic backfill (C-14) ·
+ *   014 channels key-id envelope cutover point (SEC-L2) ·
+ *   015 RLS scaffolding on BU/website tables (SEC-L1 v1)
  *
  * 000 records the pre-existing AgentOS baseline (the 11 legacy tables) so the
  * ledger is complete even on a database provisioned from empty. On the live
@@ -282,6 +289,203 @@ ALTER TABLE channels ADD COLUMN IF NOT EXISTS display_name TEXT;`;
 const M_010_APPROVALS_REVIEWER = `
 ALTER TABLE approvals ADD COLUMN IF NOT EXISTS reviewer_user_id BIGINT REFERENCES users(id) ON DELETE SET NULL;`;
 
+/**
+ * Phase 2 pull-forward (tech-lead decision, documented in the Phase 2 report):
+ * the Phase 1 in-memory rate-limit buckets are per serverless instance, which
+ * gives no global guarantee for brute-force-sensitive endpoints (login). A
+ * single-row atomic upsert fixed-window bucket is cheap and correct; the
+ * Phase 3 job engine may evolve it into the shared limiter with sliding
+ * windows if needed.
+ */
+const M_011_RATE_LIMIT_BUCKETS = `
+CREATE TABLE IF NOT EXISTS rate_limit_buckets (
+  key TEXT PRIMARY KEY,
+  count INT NOT NULL DEFAULT 0,
+  window_start TIMESTAMPTZ NOT NULL DEFAULT now()
+);`;
+
+/**
+ * Phase 2 (Phase 0.5 §5.2 P2 / §6): agents become data.
+ *  - agents: registry directory (slug, kind, executor binding, status)
+ *  - agent_versions: immutable versioned prompts/config (UNIQUE(agent_id, version))
+ *  - agent_tools: tool grants — REGISTRY ROWS ONLY in P2 (no side-effect execution)
+ *  - agent_permissions: what an agent may do (joined to permissions from 004)
+ *  - business_unit_agents: per-BU enablement without deploys (§135 P2)
+ *  - agent_identities: machine identities for future agent callers (§75)
+ * Seeded: the four surviving current agents active/bound; the remaining
+ * Phase 0.5 §6.2 registry seeded disabled with placeholders (registry-first);
+ * ambassador intentionally NOT a registry row (folded — executor retained as
+ * a prompt variant of the content path per §6.1).
+ * Also seeds the agents.manage permission (owner + administrator).
+ */
+const M_012_AGENTS_REGISTRY = `
+CREATE TABLE IF NOT EXISTS agents (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  slug TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  agent_kind TEXT NOT NULL DEFAULT 'worker' CHECK (agent_kind IN ('worker','supervisor','service')),
+  executor_kind TEXT NOT NULL DEFAULT 'bound' CHECK (executor_kind IN ('bound','llm')),
+  status TEXT NOT NULL DEFAULT 'disabled' CHECK (status IN ('active','disabled','archived')),
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS agent_versions (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  agent_id BIGINT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  version INT NOT NULL,
+  system_prompt TEXT NOT NULL DEFAULT '',
+  config JSONB NOT NULL DEFAULT '{}'::jsonb,
+  output_schema JSONB,
+  changelog TEXT,
+  created_by_user_id BIGINT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (agent_id, version)
+);
+CREATE TABLE IF NOT EXISTS agent_tools (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  agent_id BIGINT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  tool_key TEXT NOT NULL,
+  config JSONB NOT NULL DEFAULT '{}'::jsonb,
+  enabled BOOLEAN NOT NULL DEFAULT true,
+  UNIQUE (agent_id, tool_key)
+);
+CREATE TABLE IF NOT EXISTS agent_permissions (
+  agent_id BIGINT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  permission_id BIGINT NOT NULL REFERENCES permissions(id) ON DELETE CASCADE,
+  PRIMARY KEY (agent_id, permission_id)
+);
+CREATE TABLE IF NOT EXISTS business_unit_agents (
+  business_unit_id BIGINT NOT NULL REFERENCES business_units(id) ON DELETE CASCADE,
+  agent_id BIGINT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  enabled BOOLEAN NOT NULL DEFAULT true,
+  config JSONB NOT NULL DEFAULT '{}'::jsonb,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (business_unit_id, agent_id)
+);
+CREATE TABLE IF NOT EXISTS agent_identities (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  agent_id BIGINT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  key_id TEXT NOT NULL UNIQUE,
+  display_name TEXT,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','revoked')),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_used_at TIMESTAMPTZ
+);
+
+-- Survivors: active, bound to the existing executors, behavior unchanged.
+INSERT INTO agents (slug, name, description, agent_kind, executor_kind, status) VALUES
+  ('research',         'Research Agent',         'Gathers industry/news intel and produces briefs.', 'worker', 'bound', 'active'),
+  ('marketing',        'Marketing Agent',        'Turns briefs into per-channel copy drafts.', 'worker', 'bound', 'active'),
+  ('sales',            'Sales Agent',            'Builds prospect lists and drafts outreach/partnership emails, records leads.', 'worker', 'bound', 'active'),
+  ('customer_service', 'Customer Service Agent', 'Live chat answers grounded only in tenant RAG content.', 'worker', 'bound', 'active')
+ON CONFLICT (slug) DO NOTHING;
+
+-- Registry-first placeholders for the future workforce (Phase 0.5 §6.2),
+-- each enabled by its own later phase. Disabled; executor_kind 'llm' so the
+-- generic executor can run them the moment they are enabled and versioned.
+INSERT INTO agents (slug, name, description, agent_kind, executor_kind, status) VALUES
+  ('supervisor',         'Supervisor',              'Plans, decomposes and escalates across the workforce.', 'supervisor', 'llm', 'disabled'),
+  ('intelligence',       'Intelligence Agent',      'Market/competitor intelligence synthesis.', 'worker', 'llm', 'disabled'),
+  ('legal_intelligence', 'Legal Intelligence',      'Legal-domain research and monitoring for legal-class BUs.', 'worker', 'llm', 'disabled'),
+  ('competitor',         'Competitor Agent',        'Competitor tracking and diffing.', 'worker', 'llm', 'disabled'),
+  ('content_strategy',   'Content Strategy',        'Editorial strategy, calendars, theme planning.', 'worker', 'llm', 'disabled'),
+  ('content',            'Content Agent',           'Long-form content production.', 'worker', 'llm', 'disabled'),
+  ('fact_check',         'Fact Check Agent',        'Claim verification against knowledge sources.', 'worker', 'llm', 'disabled'),
+  ('seo',                'SEO Agent',               'Search optimization analysis and recommendations.', 'worker', 'llm', 'disabled'),
+  ('social_media',       'Social Media Agent',      'Channel-native social content production.', 'worker', 'llm', 'disabled'),
+  ('lead',               'Lead Agent',              'Inbound inquiry capture and qualification.', 'worker', 'llm', 'disabled'),
+  ('customer_inquiry',   'Customer Inquiry Agent',  'Pre-sale question answering (P11 split).', 'worker', 'llm', 'disabled'),
+  ('customer_support',   'Customer Support Agent',  'Post-sale support conversations (P11 split).', 'worker', 'llm', 'disabled'),
+  ('analytics',          'Analytics Agent',         'Performance analysis and anomaly detection.', 'worker', 'llm', 'disabled'),
+  ('strategy',           'Strategy Agent',          'Cross-domain strategic recommendations.', 'worker', 'llm', 'disabled'),
+  ('reporting',          'Reporting Agent',         'Scheduled reporting and digests.', 'worker', 'llm', 'disabled')
+ON CONFLICT (slug) DO NOTHING;
+
+-- Version 1 for the active agents: system prompts are the exact role lines
+-- the bound executors have always used (golden-prompt preservation).
+INSERT INTO agent_versions (agent_id, version, system_prompt, config, changelog)
+SELECT a.id, 1, v.system_prompt, '{}'::jsonb, 'Phase 2 registry import of the legacy prompt'
+FROM agents a
+JOIN (VALUES
+  ('research',         'Research agent: produce a concise intel brief with bullets and sources.'),
+  ('marketing',        'Marketing agent: write platform-appropriate social copy that fits the channel''s style and character limits.'),
+  ('sales',            'Sales agent: write a professional, non-spammy outreach or partnership pitch email.'),
+  ('customer_service', 'Customer service agent: answer only from retrieved knowledge sources.')
+) AS v(slug, system_prompt) ON v.slug = a.slug
+WHERE NOT EXISTS (SELECT 1 FROM agent_versions av WHERE av.agent_id = a.id AND av.version = 1);
+
+-- agents.manage permission: mutations on the registry (owner + administrator).
+INSERT INTO permissions (key) VALUES ('agents.manage') ON CONFLICT (key) DO NOTHING;
+INSERT INTO role_permissions (role_id, permission_id)
+SELECT r.id, p.id FROM roles r JOIN permissions p ON p.key = 'agents.manage'
+WHERE r.key IN ('owner','administrator')
+ON CONFLICT DO NOTHING;`;
+
+/**
+ * Phase 2 run attribution (Phase 0.5 §5.1 agent_runs row / §71 / C-14).
+ * Fully additive: new nullable columns + legacy prompt_hash content copied to
+ * a dedicated topic column. prompt_hash keeps its name; NEW rows carry a real
+ * sha-256 prompt hash, legacy rows keep the raw topic they always stored and
+ * now also have it in topic. Existing rows untouched otherwise.
+ */
+const M_013_AGENT_RUNS_ATTRIBUTES = `
+ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS agent_id BIGINT REFERENCES agents(id);
+ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS business_unit_id BIGINT REFERENCES business_units(id);
+ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS task_id BIGINT;
+ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS workflow_run_id BIGINT;
+ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS model TEXT;
+ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS prompt_version_id BIGINT REFERENCES agent_versions(id);
+ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS topic TEXT;
+ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ;
+ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;
+ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS duration_ms INT;
+ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS input_tokens INT;
+ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS output_tokens INT;
+ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS estimated_cost NUMERIC(12,6);
+ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS error TEXT;
+ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS error_class TEXT;
+UPDATE agent_runs SET topic = prompt_hash WHERE topic IS NULL;
+CREATE INDEX IF NOT EXISTS agent_runs_agent_idx ON agent_runs (agent_id);
+CREATE INDEX IF NOT EXISTS agent_runs_bu_idx ON agent_runs (business_unit_id);`;
+
+/**
+ * Phase 2 SEC-L2: key-id envelope encryption for channel tokens. The columns
+ * stay as-is (ciphertexts are self-describing); this migration only records
+ * nothing — the envelope format lives in lib/channels.ts and supports both
+ * the legacy iv:tag:data payloads and v2:<key_id>:iv:tag:data. Kept as a
+ * numbered (no-op) version so the ledger documents the SEC-L2 cutover point.
+ */
+const M_014_CHANNELS_KEY_ID = `
+SELECT 1;`;
+
+/**
+ * Phase 2 SEC-L1 v1: RLS enablement scaffolding on the multi-BU target
+ * tables. Policies are written for the FUTURE per-audience DB roles and use
+ * current_setting('agentos.bu_id') so the cutover is policy work, not schema
+ * work. The application connects as the table owner, which bypasses RLS
+ * unless FORCE is set — FORCE is deliberately NOT set here (the app-level
+ * BU scoping from Phase 1 remains the enforced layer; the DB backstop
+ * activates with the dedicated DB role, Phase 3/4 cutover). No behavior
+ * change for the current deployment.
+ */
+const M_015_RLS_SCAFFOLDING = `
+ALTER TABLE business_units ENABLE ROW LEVEL SECURITY;
+ALTER TABLE websites ENABLE ROW LEVEL SECURITY;
+DO $rls$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'business_units' AND policyname = 'bu_self_or_assigned') THEN
+    CREATE POLICY bu_self_or_assigned ON business_units
+      USING (id::text = COALESCE(NULLIF(current_setting('agentos.bu_id', true), ''), id::text));
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'websites' AND policyname = 'website_bu_or_assigned') THEN
+    CREATE POLICY website_bu_or_assigned ON websites
+      USING (business_unit_id::text = COALESCE(NULLIF(current_setting('agentos.bu_id', true), ''), business_unit_id::text));
+  END IF;
+END
+$rls$;`;
+
 export const MIGRATIONS: MigrationDef[] = [
   { version: "000", name: "agentos_legacy_baseline", source: M_000_LEGACY_BASELINE },
   { version: "001", name: "schema_migrations", source: M_001_SCHEMA_MIGRATIONS },
@@ -294,4 +498,9 @@ export const MIGRATIONS: MigrationDef[] = [
   { version: "008", name: "website_integrations_capabilities", source: M_008_WEBSITE_INTEGRATIONS_CAPABILITIES },
   { version: "009", name: "channels_add_columns", source: M_009_CHANNELS_ADD_COLUMNS },
   { version: "010", name: "approvals_reviewer_user", source: M_010_APPROVALS_REVIEWER },
+  { version: "011", name: "rate_limit_buckets", source: M_011_RATE_LIMIT_BUCKETS },
+  { version: "012", name: "agents_registry", source: M_012_AGENTS_REGISTRY },
+  { version: "013", name: "agent_runs_attributes", source: M_013_AGENT_RUNS_ATTRIBUTES },
+  { version: "014", name: "channels_key_id_envelope", source: M_014_CHANNELS_KEY_ID },
+  { version: "015", name: "rls_scaffolding", source: M_015_RLS_SCAFFOLDING },
 ];

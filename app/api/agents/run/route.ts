@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { dispatch, getTenantConfig } from "@/lib/agents/dispatch";
+import { dispatch, getTenantConfig, AgentNotRunnableError } from "@/lib/agents/dispatch";
 import { llm } from "@/lib/llm";
 import { sessionOrLegacyBearer } from "@/lib/auth/guards";
 import { rateLimit, clientIp, hitDailyLlmCap } from "@/lib/security/ratelimit";
@@ -22,7 +22,7 @@ export async function POST(req: Request) {
   const requestId = requestIdFor(req);
   const ip = clientIp(req);
 
-  const rl = rateLimit(`agents-run:${ip}`, 5, 60 * 1000);
+  const rl = await rateLimit(`agents-run:${ip}`, 5, 60 * 1000);
   if (!rl.allowed) {
     await writeAudit({ actorType: "anonymous", actorLabel: "ip", action: "agents.run", resource: "agent_runs", result: "denied", requestId, ip, metadata: { reason: "rate_limited" } });
     return NextResponse.json({ errors: [{ code: "RATE_LIMITED" }] }, { status: 429, headers: { "Retry-After": String(rl.retryAfterSec) } });
@@ -75,7 +75,13 @@ export async function POST(req: Request) {
       metadata: { tenantId: body.tenantId, agent: result.agent, via: gate.ctx.via },
     });
     return NextResponse.json({ data: result, meta: { ts: new Date().toISOString(), requestId } });
-  } catch {
+  } catch (e) {
+    if (e instanceof AgentNotRunnableError) {
+      // Registry refusal (disabled / BU-disabled / kill-switch / no executor):
+      // an expected, audited 409 — not an internal error.
+      await writeAudit({ actorType: gate.ctx.user ? "user" : "system", actorId: gate.ctx.user?.id ?? null, action: "agents.run", resource: "agent_runs", result: "denied", requestId, ip, metadata: { tenantId: body.tenantId, reason: e.code } });
+      return NextResponse.json({ errors: [{ code: "AGENT_NOT_RUNNABLE", detail: e.code }] }, { status: 409 });
+    }
     await writeAudit({ actorType: gate.ctx.user ? "user" : "system", actorId: gate.ctx.user?.id ?? null, action: "agents.run", resource: "agent_runs", result: "failure", requestId, ip, metadata: { tenantId: body.tenantId } });
     return NextResponse.json({ errors: [{ code: "DISPATCH_FAILED", detail: "internal error" }] }, { status: 500 });
   }

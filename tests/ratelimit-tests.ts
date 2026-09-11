@@ -34,32 +34,41 @@ async function seedTenant(): Promise<number> {
 try {
   const floodTenant = await seedTenant();
 
-  // ---------- unit: token bucket ----------
-  resetRateLimits();
-  const rl1 = rateLimit("unit:x", 3, 60_000);
-  const rl2 = rateLimit("unit:x", 3, 60_000);
-  const rl3 = rateLimit("unit:x", 3, 60_000);
-  const rl4 = rateLimit("unit:x", 3, 60_000);
+  // ---------- unit: DB-backed fixed-window bucket (migration 011) ----------
+  await resetRateLimits();
+  const rl1 = await rateLimit("unit:x", 3, 60_000);
+  const rl2 = await rateLimit("unit:x", 3, 60_000);
+  const rl3 = await rateLimit("unit:x", 3, 60_000);
+  const rl4 = await rateLimit("unit:x", 3, 60_000);
   check("bucket: allows up to limit", rl1.allowed && rl2.allowed && rl3.allowed);
   check("bucket: 4th request denied with 429 semantics", rl4.allowed === false && rl4.remaining === 0 && rl4.retryAfterSec >= 1);
-  resetRateLimits();
-  const rl5 = rateLimit("unit:x", 3, 60_000);
+  await resetRateLimits();
+  const rl5 = await rateLimit("unit:x", 3, 60_000);
   check("bucket: reset clears state", rl5.allowed);
-  check("bucket: independent keys", rateLimit("unit:y", 1, 60_000).allowed);
+  check("bucket: independent keys", (await rateLimit("unit:y", 1, 60_000)).allowed);
+  const bucketRow = (await query<{ count: number }>("SELECT count FROM rate_limit_buckets WHERE key = 'unit:x'"))[0];
+  check("bucket: counters persist in rate_limit_buckets (global across instances)", bucketRow?.count === 1);
+  const expired = await query<{ window_start: Date }>(
+    "UPDATE rate_limit_buckets SET window_start = now() - interval '2 hours' WHERE key = 'unit:x' RETURNING window_start"
+  );
+  check("bucket: expired window row loaded", expired.length === 1);
+  const rl6 = await rateLimit("unit:x", 3, 60_000);
+  check("bucket: window expiry resets the counter", rl6.allowed && rl6.resetAt > Date.now());
+  await resetRateLimits();
 
   // clientIp: x-forwarded-for first hop wins
   const ipReq = new Request("http://localhost/", { headers: { "x-forwarded-for": "203.0.113.7, 10.0.0.1", "x-real-ip": "198.51.100.1" } });
   check("clientIp: first x-forwarded-for hop", clientIp(ipReq) === "203.0.113.7");
 
   // ---------- route: login flood -> 429 ----------
-  resetRateLimits();
+  await resetRateLimits();
   let saw429 = false;
   for (let i = 0; i < 12; i++) {
     const r = await loginRoute.POST(post("/api/auth/login", { "Content-Type": "application/json" }, { email: `flood-${i}-${stamp}@test.local`, password: "whatever-xyz" }));
     if (r.status === 429) saw429 = true;
   }
   check("login flood: 429 after 10/5min per IP", saw429);
-  resetRateLimits();
+  await resetRateLimits();
 
   // ---------- route: agents/run flood -> 429 (before auth even matters) ----------
   let run429 = false;
@@ -70,7 +79,7 @@ try {
     if (r.status === 401) run401++;
   }
   check("run flood: unauthenticated 401s then 429", run401 === 5 && run429, `401s=${run401} 429=${run429}`);
-  resetRateLimits();
+  await resetRateLimits();
 
   // ---------- route: chat flood -> 429 (public endpoint) ----------
   let chat429 = false;
@@ -79,7 +88,7 @@ try {
     if (r.status === 429) chat429 = true;
   }
   check("chat flood: 429 after 10/min per IP", chat429);
-  resetRateLimits();
+  await resetRateLimits();
 
   // ---------- per-tenant daily LLM cap (DB-backed) ----------
   process.env.DAILY_TENANT_LLM_CAP = "2";
@@ -108,7 +117,7 @@ try {
   check("daily cap: authenticated run over cap -> 429 DAILY_LLM_CAP_REACHED", cappedRun.status === 429 && (await cappedRun.json()).errors?.[0]?.code === "DAILY_LLM_CAP_REACHED", `status=${cappedRun.status}`);
   delete process.env.DAILY_TENANT_LLM_CAP;
 } finally {
-  resetRateLimits();
+  await resetRateLimits();
   await query("DELETE FROM sessions WHERE user_id = ANY($1)", [createdUserIds.length ? createdUserIds : [0]]);
   await query("DELETE FROM users WHERE id = ANY($1)", [createdUserIds.length ? createdUserIds : [0]]);
   await query("DELETE FROM tenants WHERE id = ANY($1)", [createdTenantIds.length ? createdTenantIds : [0]]);

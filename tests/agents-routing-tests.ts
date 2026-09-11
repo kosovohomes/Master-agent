@@ -14,7 +14,8 @@ function check(name: string, cond: boolean, detail = "") {
 check("chat channel routes to customer_service", routeAgent({ topic: "help with your pricing", channel: "chat" }).agent === "customer_service");
 check("research topic routes to research", routeAgent({ topic: "gather legal industry news for next week", channel: "" }).agent === "research");
 check("sales topic routes to sales", routeAgent({ topic: "draft outreach to law firm partners", channel: "email" }).agent === "sales");
-check("ambassador topic routes to ambassador", routeAgent({ topic: "promote our award mention", channel: "linkedin" }).agent === "ambassador");
+check("ambassador topic folds to marketing (Phase 2 \u00a76.1)", routeAgent({ topic: "promote our award mention", channel: "linkedin" }).agent === "marketing");
+check("fold reason documents the ambassador fold", routeAgent({ topic: "promote our award mention", channel: "linkedin" }).reason.includes("ambassador"));
 check("default routes to marketing", routeAgent({ topic: "post about our services", channel: "x" }).agent === "marketing");
 
 // --- hard split: customer_service ONLY via chat, generation NEVER via chat ---
