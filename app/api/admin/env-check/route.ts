@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { authorizeOpsOrAdmin } from "@/lib/admin";
+import { writeAudit, requestIdFor } from "@/lib/audit";
 
 export const runtime = "nodejs";
 
@@ -24,10 +25,13 @@ const KEYS = [
  * reports whether each expected variable is present and its length.
  * Never returns values. For DATABASE_URL only, it additionally reports
  * scheme + host (no credentials) so misconfigured local URLs are obvious.
+ * Calls are audited (metadata contains no variable values).
  */
 export async function GET(req: Request) {
-  const token = req.headers.get("authorization")?.replace("Bearer ", "") ?? null;
+  const requestId = requestIdFor(req);
+  const token = req.headers.get("authorization")?.replace(/^Bearer\s+/i, "") ?? null;
   if (!authorizeOpsOrAdmin(token)) {
+    await writeAudit({ actorType: "anonymous", actorLabel: "ops:bearer", action: "ops.env_check", resource: "env", result: "denied", requestId });
     return NextResponse.json({ errors: [{ code: "UNAUTHORIZED" }] }, { status: 401 });
   }
   const report = KEYS.map((k) => {
@@ -49,5 +53,6 @@ export async function GET(req: Request) {
     }
     return item;
   });
-  return NextResponse.json({ data: report });
+  await writeAudit({ actorType: "system", actorLabel: "ops:bearer", action: "ops.env_check", resource: "env", result: "success", requestId });
+  return NextResponse.json({ data: report, meta: { requestId } });
 }
