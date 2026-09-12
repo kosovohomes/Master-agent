@@ -47,16 +47,26 @@ export async function ingestText(ctx: Context, p: {
     throw new Error(`embed returned ${embeddings.length} vector(s) for ${chunks.length} input(s)`);
   }
 
+  // Phase 5: legacy-ingested documents are widget-visible by design, so the
+  // v2 scope columns are stamped here too (public access + BU mapping) —
+  // otherwise documents created after the M_024 backfill would be invisible
+  // to the scoped public chat path. Legacy readers are unaffected.
   const docRows = await query<{ id: number }>(
-    `INSERT INTO documents (tenant_id, source_id, title, url, checksum)
-     VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+    `INSERT INTO documents (tenant_id, source_id, title, url, checksum, access_level)
+     VALUES ($1, $2, $3, $4, $5, 'public') RETURNING id`,
     [p.tenantId, p.sourceId, p.title, p.url ?? null, checksum]
   );
   const documentId = docRows[0].id;
+  await query(
+    `UPDATE documents d SET business_unit_id = bu.id
+     FROM business_units bu
+     WHERE bu.legacy_tenant_id = d.tenant_id AND d.id = $1`,
+    [documentId]
+  ).catch(() => undefined);
   for (let i = 0; i < chunks.length; i++) {
     await query(
-      `INSERT INTO chunks (document_id, tenant_id, content, embedding)
-       VALUES ($1, $2, $3, $4::vector)`,
+      `INSERT INTO chunks (document_id, tenant_id, content, embedding, tsv)
+       VALUES ($1, $2, $3, $4::vector, to_tsvector('english', $3))`,
       [documentId, p.tenantId, chunks[i], JSON.stringify(embeddings[i])]
     );
   }

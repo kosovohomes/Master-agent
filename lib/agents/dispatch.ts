@@ -2,6 +2,7 @@ import type { LLMClient } from "../ai/types";
 import type { GatewayClient } from "../ai/gateway";
 import { linkRun, runTotals } from "../ai/usage";
 import type { AgentGoal } from "./types";
+import type { KnowledgeCitation } from "../knowledge/types";
 import { routeAgent, recordRun, classifyError } from "./core";
 import { promptHash, checkRunnable, buIdForLegacyTenant, getAgentBySlug, currentVersion } from "./registry";
 import { BOUND_EXECUTORS, makeGenericLLMExecutor } from "./executors";
@@ -28,6 +29,8 @@ export async function getTenantConfig(tenantId: number): Promise<TenantCfg> {
 
 export interface DispatchResult {
   runId: number; agent: string; routeReason: string; draftId: number | null;
+  /** Phase 5: research grounding citations (tier + provenance) when grounded. */
+  citations?: KnowledgeCitation[] | null;
 }
 
 export type AgentNotRunnableCode =
@@ -63,6 +66,17 @@ export async function dispatch(
     getConfig(tenantId: number): Promise<TenantCfg>;
     /** Phase 4: engine-provided attribution (task ceiling + ledger task_id). */
     attribution?: { taskId?: number | null };
+    /**
+     * Phase 5: scoped knowledge retrieval for research grounding. Callers
+     * pass it only when the knowledge_v2 flag is ON (flag OFF = legacy
+     * behavior, zero code path difference). Absent → no grounding.
+     */
+    retrieveKnowledge?: (p: {
+      businessUnitId: number | null;
+      agentSlug: string;
+      query: string;
+      topK?: number;
+    }) => Promise<KnowledgeCitation[]>;
   },
   goal: AgentGoal
 ): Promise<DispatchResult> {
@@ -93,11 +107,42 @@ export async function dispatch(
   if (!agent) throw new AgentNotRunnableError("AGENT_NOT_FOUND");
   const version = await currentVersion(agent.id);
 
+  // Phase 5: research agents ground their briefs in scoped knowledge. The
+  // scope set is resolved HERE (BU + agent identity) so the researcher can
+  // never receive another BU's corpus or agent-restricted material. Best
+  // effort: a retrieval failure degrades to an ungrounded run, never a crash.
+  let citations: KnowledgeCitation[] | null = null;
+  if (agent.slug === "research" && ctx.retrieveKnowledge) {
+    try {
+      citations = await ctx.retrieveKnowledge({
+        businessUnitId,
+        agentSlug: "research",
+        query: goal.topic,
+        topK: 5,
+      });
+    } catch {
+      citations = null;
+    }
+  }
+
+  const groundedContext =
+    citations && citations.length > 0
+      ? [
+          goal.context ?? "",
+          "Grounded knowledge passages (cite as [title — authority tier Tn]; never invent facts beyond them):",
+          ...citations.map(
+            (c) => `[${c.title} — authority tier T${c.authorityTier}] ${c.content}`
+          ),
+        ]
+          .filter((part) => part !== "")
+          .join("\n\n")
+      : goal.context;
+
   const input = {
     tenantId: goal.tenantId,
     channel: goal.channel,
     topic: goal.topic,
-    context: goal.context,
+    context: groundedContext,
     config: await ctx.getConfig(goal.tenantId),
   };
 
@@ -151,6 +196,7 @@ export async function dispatch(
       completedAt,
       durationMs: completedAt.getTime() - startedAt.getTime(),
       outputRef: out.draftId != null ? `drafts/${out.draftId}` : null,
+      citations: citations ?? undefined,
     });
     // Phase 4: back-link ledger rows to the run + token-accurate run totals
     // (agent_runs.input_tokens/output_tokens/estimated_cost, §71 P4 note).
@@ -162,7 +208,7 @@ export async function dispatch(
         [run.runId, totals.promptTokens, totals.completionTokens, totals.costUsd]
       ).catch(() => undefined);
     }
-    return { runId: run.runId, agent: agent.slug, routeReason: route.reason, draftId: out.draftId };
+    return { runId: run.runId, agent: agent.slug, routeReason: route.reason, draftId: out.draftId, citations };
   } catch (e) {
     const completedAt = new Date();
     // Failed executions are recorded (§71) — the run ledger must show them.

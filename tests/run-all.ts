@@ -50,6 +50,11 @@ const files = [
   "tests/budgets-tests.ts",
   "tests/structured-tests.ts",
   "tests/call-site-grep-tests.ts",
+  // Phase 5 suites
+  "tests/knowledge-chunking-tests.ts",
+  "tests/knowledge-fetchers-tests.ts",
+  "tests/knowledge-scopes-tests.ts",
+  "tests/knowledge-retrieval-tests.ts",
 ];
 let failures = 0;
 for (const f of files) {

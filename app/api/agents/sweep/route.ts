@@ -5,6 +5,7 @@ import { safeEqual } from "@/lib/security";
 import { isFlagEnabled } from "@/lib/settings";
 import { writeAudit, requestIdFor } from "@/lib/audit";
 import { tick, triggerWorkflow, settleWorkflowRun } from "@/lib/tasks/engine";
+import { spawnDueKnowledgeFetches } from "@/lib/knowledge/service";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -60,9 +61,16 @@ async function handle(req: Request) {
   });
 
   let tickResult: Awaited<ReturnType<typeof tick>> | null = null;
+  let knowledgeSpawned: Awaited<ReturnType<typeof spawnDueKnowledgeFetches>> | null = null;
   if (triggered) {
     tickResult = await tick({ workerId: "cron-sweep", batch: 20 });
     await settleWorkflowRun(triggered.workflowRunId);
+  }
+
+  // Phase 5: scheduled knowledge refresh — spawn fetch tasks for due sources
+  // (gated by the knowledge_v2 flag so the rollback hatch covers this too).
+  if (await isFlagEnabled("knowledge_v2", false)) {
+    knowledgeSpawned = await spawnDueKnowledgeFetches().catch(() => null);
   }
 
   await writeAudit({
@@ -70,6 +78,7 @@ async function handle(req: Request) {
     result: "success", requestId,
     metadata: {
       mode: "engine", workflow: triggered ?? null, tick: tickResult as unknown as Record<string, unknown> | null,
+      knowledgeSpawned: knowledgeSpawned as unknown as Record<string, unknown> | null,
     },
   });
   return NextResponse.json({
@@ -77,6 +86,7 @@ async function handle(req: Request) {
       mode: "engine" as const,
       workflow: triggered,
       tick: tickResult,
+      knowledgeSpawned,
     },
     meta: { requestId },
   });

@@ -22,7 +22,9 @@ export type EventName =
   | "publish.failed"
   | "publish.succeeded"
   | "workflow.run_failed"
-  | "budget.hard_stop";
+  | "budget.hard_stop"
+  | "knowledge.source.fetched"
+  | "knowledge.source.failed";
 
 /** v1 notification policy: which events page ops, and what the subject says. */
 const RULES: Record<EventName, { subject: (p: Record<string, unknown>) => string } | null> = {
@@ -33,6 +35,12 @@ const RULES: Record<EventName, { subject: (p: Record<string, unknown>) => string
   "workflow.run_failed": { subject: (p) => `Workflow run failed (${p.workflow})` },
   "budget.hard_stop": {
     subject: (p) => `Budget hard-stop: ${p.scope} — spend $${p.spentUsd} hit limit $${p.limitUsd}`,
+  },
+  "knowledge.source.fetched": {
+    subject: (p) => `Knowledge source #${p.sourceId} fetched: ${p.ingested} new, ${p.deduplicated} unchanged`,
+  },
+  "knowledge.source.failed": {
+    subject: (p) => `Knowledge source #${p.sourceId} fetch failed`,
   },
 };
 

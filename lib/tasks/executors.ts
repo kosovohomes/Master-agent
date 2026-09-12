@@ -21,7 +21,10 @@
  * production registrations happen in registerBuiltins() at import time.
  */
 import type { LLMClient } from "../ai/types";
+import type { GatewayClient } from "../ai/gateway";
 import { ai as defaultLlm } from "../ai";
+import { makeKnowledgeFetchHandler } from "../knowledge/tasks";
+import { knowledgeFetcher } from "../knowledge/fetchers";
 import { dispatch, getTenantConfig } from "../agents/dispatch";
 import { routeAgent } from "../agents/core";
 import type { AgentGoal } from "../agents/types";
@@ -306,6 +309,18 @@ export function registerBuiltins(): void {
   registerTaskHandler("agent_dispatch", makeAgentDispatchHandler({ llm: builtinLlm }));
   registerTaskHandler("publishing_sweep", makePublishingSweepHandler({ publish: realPublish }));
   registerTaskHandler("send_notification", makeSendNotificationHandler({ sendEmail: (...args) => emailSender(...args) }));
+  // Phase 5: durable knowledge source refresh — embeddings ride the gateway
+  // (budget-enforced, ledgered, BU-attributed purpose=knowledge_ingest).
+  registerTaskHandler("knowledge_fetch", makeKnowledgeFetchHandler({
+    fetcher: knowledgeFetcher,
+    embedProvider: ({ businessUnitId, taskId }) => {
+      const gateway = builtinLlm as LLMClient & Partial<GatewayClient>;
+      if (typeof gateway.withAttribution === "function") {
+        return gateway.withAttribution({ businessUnitId, taskId, purpose: "knowledge_ingest" });
+      }
+      return builtinLlm;
+    },
+  }));
 }
 
 // Test seam: override the LLM client used by the builtin agent_dispatch.

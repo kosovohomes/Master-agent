@@ -61,6 +61,8 @@ export interface RunRecordParams {
   estimatedCost?: number | null;
   error?: string | null;
   errorClass?: string | null;
+  /** Phase 5: research grounding citations (tier + provenance per P5 acceptance). */
+  citations?: unknown;
 }
 
 /**
@@ -76,9 +78,9 @@ export async function recordRun(p: RunRecordParams): Promise<{ runId: number }> 
        tenant_id, agent, trigger, status, prompt_hash, output_ref,
        agent_id, business_unit_id, prompt_version_id, topic, model,
        started_at, completed_at, duration_ms, input_tokens, output_tokens,
-       estimated_cost, error, error_class
+       estimated_cost, error, error_class, citations
      )
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20::jsonb)
      RETURNING id`,
     [
       p.tenantId,
@@ -100,6 +102,7 @@ export async function recordRun(p: RunRecordParams): Promise<{ runId: number }> 
       p.estimatedCost ?? null,
       p.error ? p.error.slice(0, 2000) : null,
       p.errorClass ?? null,
+      p.citations != null ? JSON.stringify(p.citations) : null,
     ]
   );
   return { runId: rows[0].id };

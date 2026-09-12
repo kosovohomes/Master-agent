@@ -15,6 +15,7 @@ export default async function DashboardLayout({ children }: { children: React.Re
     { href: "/agents", label: "Agents", show: perms.has("drafts.read") || perms.has("agents.manage") || perms.has("agents.run") },
     { href: "/operations", label: "Operations", show: perms.has("audit.read") },
     { href: "/gateway", label: "AI Gateway", show: perms.has("llm.view") || perms.has("budgets.manage") || perms.has("audit.read") },
+    { href: "/knowledge", label: "Knowledge", show: perms.has("knowledge.manage") || perms.has("audit.read") },
     { href: "/websites", label: "Websites", show: perms.has("bu.manage") || perms.has("website.manage") || perms.has("drafts.read") },
     { href: "/approvals", label: "Approvals", show: perms.has("drafts.read") },
     { href: "/audit", label: "Audit", show: perms.has("audit.read") },

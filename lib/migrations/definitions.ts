@@ -19,6 +19,12 @@
  *   017 workflows/workflow_runs + scheduled_publishing_sweep seed (Workflow #1) ·
  *   018 events/notifications (event bus + notifications v1) ·
  *   019 content_publications (idempotent publication ledger; outbox write-stop)
+ * Phase 5 (§11 P5, knowledge system v2 — scopes §9.1, metadata §9.2):
+ *   023 knowledge_sources (source registry + content_sources backfill) ·
+ *   024 documents scoping (GLOBAL/BU/WEBSITE/JURISDICTION/AGENT + legal/
+ *       authority/language/lifecycle metadata + agent_runs.citations) ·
+ *   025 chunks hybrid retrieval (tsvector leg + chunk_no + GIN) ·
+ *   026 knowledge_v2 flag + knowledge.manage permission
  *
  * 000 records the pre-existing AgentOS baseline (the 11 legacy tables) so the
  * ledger is complete even on a database provisioned from empty. On the live
@@ -749,6 +755,144 @@ JOIN permissions p ON p.key IN ('llm.view','budgets.manage')
 WHERE r.key IN ('owner','administrator')
 ON CONFLICT DO NOTHING;`;
 
+/**
+ * Phase 5 — knowledge_sources registry (§17–§18 via §9.2): the platform-facing
+ * source of knowledge ingestion. Scope: business_unit_id NULL = global,
+ * website_id NULL = BU-wide. Legal/authority/language/lifecycle metadata live
+ * here and are stamped onto every ingested document. Legacy content_sources
+ * stays untouched (rename/view swap deferred to the cleanup phase, same
+ * decision as Phase 4's tenants/outbox deferral); existing rows backfill via
+ * the 1:1 tenant→BU map — mapped rows only, unmapped legacy sources stay out
+ * of the scoped registry rather than silently becoming global.
+ */
+const M_023_KNOWLEDGE_SOURCES = `
+CREATE TABLE IF NOT EXISTS knowledge_sources (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  business_unit_id BIGINT REFERENCES business_units(id) ON DELETE CASCADE,
+  website_id BIGINT REFERENCES websites(id) ON DELETE SET NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('sitemap','upload','api','rss','url','github','db')),
+  ref TEXT NOT NULL,
+  title TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  authority_level INT NOT NULL DEFAULT 3 CHECK (authority_level BETWEEN 1 AND 5),
+  jurisdiction TEXT,
+  state_province TEXT,
+  country TEXT,
+  language TEXT,
+  document_type TEXT,
+  access_level TEXT NOT NULL DEFAULT 'internal' CHECK (access_level IN ('public','internal','confidential')),
+  refresh_frequency TEXT NOT NULL DEFAULT 'manual' CHECK (refresh_frequency IN ('manual','hourly','daily','weekly')),
+  max_documents INT NOT NULL DEFAULT 10 CHECK (max_documents BETWEEN 1 AND 200),
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','disabled','error')),
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  last_checked TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS knowledge_sources_bu_idx ON knowledge_sources (business_unit_id);
+
+INSERT INTO knowledge_sources
+  (business_unit_id, kind, ref, title, status, last_checked, metadata)
+SELECT bu.id, cs.kind, cs.ref, cs.ref, 'active', cs.last_synced_at,
+       jsonb_build_object(
+         'backfilledFrom', 'content_sources',
+         'legacySourceId', cs.id::text,
+         'legacyTenantId', cs.tenant_id::text
+       )
+FROM content_sources cs
+JOIN business_units bu ON bu.legacy_tenant_id = cs.tenant_id
+WHERE NOT EXISTS (
+  SELECT 1 FROM knowledge_sources ks
+  WHERE ks.metadata->>'legacySourceId' = cs.id::text
+);`;
+
+/**
+ * Phase 5 — documents scope + metadata (§9.1–§9.2). The five scopes:
+ * GLOBAL (business_unit_id NULL) → BUSINESS (business_unit_id) → WEBSITE
+ * (website_id NULL = BU-wide) → JURISDICTION (jurisdiction NULL = unscoped)
+ * → AGENT (agent_scopes '[]' = unrestricted). Legal contract columns serve
+ * §50–§51 (law from one jurisdiction never assumed elsewhere); authority
+ * tiers 1–5 feed research citations; provenance stamps fetch origin.
+ *
+ * Additive posture: tenant_id/source_id become OPTIONAL (v2 ingests write
+ * knowledge_source_id instead) — no data touched, legacy ingest keeps both.
+ * Backfill maps existing documents onto their BU and stamps access_level
+ * 'public' (the legacy widget chat was public-by-design, so behavior is
+ * preserved when the knowledge_v2 flag flips ON).
+ */
+const M_024_DOCUMENTS_SCOPING = `
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS business_unit_id BIGINT REFERENCES business_units(id);
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS website_id BIGINT REFERENCES websites(id);
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS knowledge_source_id BIGINT REFERENCES knowledge_sources(id) ON DELETE SET NULL;
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS jurisdiction TEXT;
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS country TEXT;
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS state_province TEXT;
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS court_system TEXT;
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS language TEXT;
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS document_type TEXT;
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS access_level TEXT NOT NULL DEFAULT 'internal' CHECK (access_level IN ('public','internal','confidential'));
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS authority_tier INT NOT NULL DEFAULT 3 CHECK (authority_tier BETWEEN 1 AND 5);
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS effective_date DATE;
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS source_date DATE;
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS source_url TEXT;
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS provenance JSONB NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS verification_status TEXT NOT NULL DEFAULT 'unverified' CHECK (verification_status IN ('unverified','verified','stale','contradicted'));
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS agent_scopes JSONB NOT NULL DEFAULT '[]'::jsonb;
+
+ALTER TABLE documents ALTER COLUMN source_id DROP NOT NULL;
+ALTER TABLE documents ALTER COLUMN tenant_id DROP NOT NULL;
+ALTER TABLE chunks ALTER COLUMN tenant_id DROP NOT NULL;
+
+UPDATE documents d
+SET business_unit_id = bu.id, access_level = 'public'
+FROM business_units bu
+WHERE bu.legacy_tenant_id = d.tenant_id
+  AND d.business_unit_id IS NULL;
+
+CREATE INDEX IF NOT EXISTS documents_bu_idx ON documents (business_unit_id);
+CREATE INDEX IF NOT EXISTS documents_website_idx ON documents (website_id) WHERE website_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS documents_jurisdiction_idx ON documents (jurisdiction) WHERE jurisdiction IS NOT NULL;
+CREATE INDEX IF NOT EXISTS documents_checksum_idx ON documents (checksum);
+
+-- Research citations at the run level (tier + provenance, P5 acceptance).
+ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS citations JSONB;`;
+
+/**
+ * Phase 5 — hybrid retrieval leg 1 (keyword): tsvector on chunks backfilled
+ * and GIN-indexed; chunk_no preserves document order for structure-aware
+ * re-chunking. Vector leg (ivfflat) is unchanged — retrieval merges both
+ * legs by reciprocal-rank fusion. to_tsvector('english', content) is
+ * computed in SQL on both write and backfill so the two can never drift.
+ */
+const M_025_CHUNKS_HYBRID = `
+ALTER TABLE chunks ADD COLUMN IF NOT EXISTS tsv tsvector;
+ALTER TABLE chunks ADD COLUMN IF NOT EXISTS chunk_no INT NOT NULL DEFAULT 0;
+
+UPDATE chunks SET tsv = to_tsvector('english', content) WHERE tsv IS NULL;
+
+CREATE INDEX IF NOT EXISTS chunks_tsv_idx ON chunks USING gin (tsv);
+CREATE INDEX IF NOT EXISTS chunks_doc_no_idx ON chunks (document_id, chunk_no);`;
+
+/**
+ * Phase 5 — rollback seam + admin permission. knowledge_v2 OFF = every
+ * consumer (widget chat, research grounding) uses the legacy tenant-only
+ * retrieval, zero code change. knowledge.manage gates the Knowledge screen
+ * and admin APIs (owner + administrator).
+ */
+const M_026_KNOWLEDGE_FLAG_PERMS = `
+INSERT INTO feature_flags (key, enabled, emergency, description)
+VALUES ('knowledge_v2', TRUE, FALSE,
+        'Knowledge v2: scoped hybrid retrieval, fetchers, research grounding (OFF = legacy tenant-only retrieval)')
+ON CONFLICT (key) DO NOTHING;
+
+INSERT INTO permissions (key) VALUES ('knowledge.manage') ON CONFLICT (key) DO NOTHING;
+
+INSERT INTO role_permissions (role_id, permission_id)
+SELECT r.id, p.id FROM roles r
+JOIN permissions p ON p.key = 'knowledge.manage'
+WHERE r.key IN ('owner','administrator')
+ON CONFLICT DO NOTHING;`;
+
 export const MIGRATIONS: MigrationDef[] = [
   { version: "000", name: "agentos_legacy_baseline", source: M_000_LEGACY_BASELINE },
   { version: "001", name: "schema_migrations", source: M_001_SCHEMA_MIGRATIONS },
@@ -773,4 +917,8 @@ export const MIGRATIONS: MigrationDef[] = [
   { version: "020", name: "ai_gateway_ledger", source: M_020_AI_GATEWAY_LEDGER },
   { version: "021", name: "budgets", source: M_021_BUDGETS },
   { version: "022", name: "gateway_flag_permissions", source: M_022_GATEWAY_FLAG_PERMISSIONS },
+  { version: "023", name: "knowledge_sources", source: M_023_KNOWLEDGE_SOURCES },
+  { version: "024", name: "documents_scoping", source: M_024_DOCUMENTS_SCOPING },
+  { version: "025", name: "chunks_hybrid", source: M_025_CHUNKS_HYBRID },
+  { version: "026", name: "knowledge_flag_permissions", source: M_026_KNOWLEDGE_FLAG_PERMS },
 ];

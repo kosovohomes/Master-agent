@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { ai, BudgetExceededError } from "@/lib/ai";
 import { query } from "@/lib/db";
 import { retrieve } from "@/lib/rag/retrieve";
+import { hybridRetrieve } from "@/lib/knowledge/retrieve";
 import { getTenantConfig } from "@/lib/agents/dispatch";
 import { buIdForLegacyTenant } from "@/lib/agents/registry";
 import { answerChat } from "@/lib/agents/chat";
@@ -68,9 +69,24 @@ export async function POST(req: Request) {
     // answers AND retrieval embeddings are ledgered and budget-enforced.
     const buId = await buIdForLegacyTenant(body.tenantId as number).catch(() => null);
     const chatLlm = ai.withAttribution({ businessUnitId: buId, purpose: "chat_answer" });
+    // Phase 5: knowledge_v2 ON → scoped hybrid retrieval (GLOBAL/BU/WEBSITE/
+    // JURISDICTION/AGENT enforced, public-only for this anonymous caller,
+    // keyword leg survives provider outages). OFF → legacy tenant-only path.
+    const knowledgeV2 = await isFlagEnabled("knowledge_v2", false);
     const result = await answerChat({
       llm: chatLlm,
-      retrieve: (p) => retrieve({ embed: (texts) => chatLlm.embed(texts) }, p),
+      retrieve: knowledgeV2
+        ? (p) =>
+            hybridRetrieve(chatLlm, {
+              scope: {
+                businessUnitId: buId,
+                agentSlug: "customer_service",
+                publicOnly: true,
+              },
+              query: p.query,
+              topK: p.topK,
+            })
+        : (p) => retrieve({ embed: (texts) => chatLlm.embed(texts) }, p),
     }, {
       tenantId: body.tenantId as number,
       question: body.question.trim(),
