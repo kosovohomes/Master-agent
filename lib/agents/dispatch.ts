@@ -1,4 +1,6 @@
-import type { LLMClient } from "../llm";
+import type { LLMClient } from "../ai/types";
+import type { GatewayClient } from "../ai/gateway";
+import { linkRun, runTotals } from "../ai/usage";
 import type { AgentGoal } from "./types";
 import { routeAgent, recordRun, classifyError } from "./core";
 import { promptHash, checkRunnable, buIdForLegacyTenant, getAgentBySlug, currentVersion } from "./registry";
@@ -56,7 +58,12 @@ function currentModel(): string {
  * layer propagates to behavior within one run, zero deploys.
  */
 export async function dispatch(
-  ctx: { llm: LLMClient; getConfig(tenantId: number): Promise<TenantCfg> },
+  ctx: {
+    llm: LLMClient;
+    getConfig(tenantId: number): Promise<TenantCfg>;
+    /** Phase 4: engine-provided attribution (task ceiling + ledger task_id). */
+    attribution?: { taskId?: number | null };
+  },
   goal: AgentGoal
 ): Promise<DispatchResult> {
   const route = routeAgent(goal);
@@ -102,13 +109,32 @@ export async function dispatch(
             systemPrompt: version.systemPrompt,
             agentSlug: agent.slug,
             outputSchema: version.outputSchema,
+            // Phase 4 routing policy: per-agent model override rides the
+            // version config (agent_versions.config.model). Absent → gateway
+            // default resolution (env > gpt-4o-mini).
+            model: (version.config as { model?: string } | null)?.model ?? undefined,
           })
         : undefined;
   if (!executor) throw new AgentNotRunnableError("AGENT_EXECUTOR_MISSING");
 
+  // Phase 4: attach gateway attribution so every ledger row carries BU /
+  // agent / task / purpose. Plain test stubs (no withAttribution) pass
+  // through untouched — dispatch stays test-seam compatible.
+  const gatewayClient = ctx.llm as LLMClient & Partial<GatewayClient>;
+  const runLlm: LLMClient =
+    typeof gatewayClient.withAttribution === "function"
+      ? gatewayClient.withAttribution({
+          businessUnitId,
+          agentId: agent.id,
+          agentSlug: agent.slug,
+          taskId: ctx.attribution?.taskId ?? null,
+          purpose: "draft_generation",
+        })
+      : ctx.llm;
+
   const startedAt = new Date();
   try {
-    const out = await executor({ llm: ctx.llm }, input);
+    const out = await executor({ llm: runLlm }, input);
     const completedAt = new Date();
     const run = await recordRun({
       tenantId: goal.tenantId,
@@ -126,11 +152,21 @@ export async function dispatch(
       durationMs: completedAt.getTime() - startedAt.getTime(),
       outputRef: out.draftId != null ? `drafts/${out.draftId}` : null,
     });
+    // Phase 4: back-link ledger rows to the run + token-accurate run totals
+    // (agent_runs.input_tokens/output_tokens/estimated_cost, §71 P4 note).
+    await linkRun({ runId: run.runId, agentId: agent.id, businessUnitId, since: startedAt });
+    const totals = await runTotals(run.runId).catch(() => null);
+    if (totals) {
+      await query(
+        "UPDATE agent_runs SET input_tokens = $2, output_tokens = $3, estimated_cost = $4 WHERE id = $1",
+        [run.runId, totals.promptTokens, totals.completionTokens, totals.costUsd]
+      ).catch(() => undefined);
+    }
     return { runId: run.runId, agent: agent.slug, routeReason: route.reason, draftId: out.draftId };
   } catch (e) {
     const completedAt = new Date();
     // Failed executions are recorded (§71) — the run ledger must show them.
-    await recordRun({
+    const failedRun = await recordRun({
       tenantId: goal.tenantId,
       agent: agent.slug,
       agentId: agent.id,
@@ -148,7 +184,13 @@ export async function dispatch(
       durationMs: completedAt.getTime() - startedAt.getTime(),
       error: e instanceof Error ? e.message : String(e),
       errorClass: classifyError(e),
-    }).catch(() => undefined); // never mask the original failure
+    }).catch(() => null); // never mask the original failure
+    // Attribute any ledgered attempts (errors/blocks) of this run too.
+    if (failedRun) {
+      await linkRun({ runId: failedRun.runId, agentId: agent.id, businessUnitId, since: startedAt }).catch(
+        () => undefined
+      );
+    }
     throw e;
   }
 }

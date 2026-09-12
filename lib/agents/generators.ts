@@ -1,4 +1,4 @@
-import type { LLMClient } from "../llm";
+import type { LLMClient } from "../ai/types";
 import type { AgentId } from "./types";
 import { createDraft } from "./approval";
 import { query } from "../db";

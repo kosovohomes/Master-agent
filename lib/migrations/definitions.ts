@@ -655,6 +655,100 @@ CREATE TABLE IF NOT EXISTS content_publications (
 CREATE INDEX IF NOT EXISTS content_publications_draft_idx ON content_publications (draft_id);
 CREATE INDEX IF NOT EXISTS content_publications_status_idx ON content_publications (status);`;
 
+/**
+ * Phase 4 — AI Gateway ledger (§8, §24): one row per gateway attempt
+ * (ok | error | budget_blocked | rate_limited) with tokens, cost, latency
+ * and full attribution (BU / agent / run / task / purpose). model_prices is
+ * the operator-editable cost source of truth. agent_run_id/task_id are
+ * plain BIGINT (no FK): run rows are recorded AFTER execution and the
+ * gateway back-links in the same request; ledger must never be blocked by
+ * run-row lifecycle.
+ */
+const M_020_AI_GATEWAY_LEDGER = `
+CREATE TABLE IF NOT EXISTS llm_requests (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  business_unit_id BIGINT,
+  agent_id BIGINT,
+  agent_slug TEXT,
+  agent_run_id BIGINT,
+  task_id BIGINT,
+  provider TEXT NOT NULL DEFAULT 'openai',
+  kind TEXT NOT NULL CHECK (kind IN ('chat','embed')),
+  model TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('ok','error','budget_blocked','rate_limited')),
+  error_code TEXT,
+  prompt_tokens INTEGER,
+  completion_tokens INTEGER,
+  total_tokens INTEGER,
+  cost_usd NUMERIC(14,8) NOT NULL DEFAULT 0,
+  latency_ms INTEGER,
+  attempt_no INTEGER NOT NULL DEFAULT 1,
+  purpose TEXT,
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS llm_requests_bu_time_idx ON llm_requests (business_unit_id, created_at);
+CREATE INDEX IF NOT EXISTS llm_requests_agent_time_idx ON llm_requests (agent_id, created_at);
+CREATE INDEX IF NOT EXISTS llm_requests_run_idx ON llm_requests (agent_run_id) WHERE agent_run_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS llm_requests_task_idx ON llm_requests (task_id) WHERE task_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS model_prices (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  provider TEXT NOT NULL,
+  model TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('chat','embed')),
+  input_per_1k_usd NUMERIC(12,8) NOT NULL CHECK (input_per_1k_usd >= 0),
+  output_per_1k_usd NUMERIC(12,8) CHECK (output_per_1k_usd IS NULL OR output_per_1k_usd >= 0),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (provider, model, kind)
+);
+INSERT INTO model_prices (provider, model, kind, input_per_1k_usd, output_per_1k_usd) VALUES
+  ('openai', 'gpt-4o-mini', 'chat', 0.00015000, 0.00060000),
+  ('openai', 'gpt-4o', 'chat', 0.00250000, 0.01000000),
+  ('openai', 'text-embedding-3-small', 'embed', 0.00002000, NULL),
+  ('openai', 'text-embedding-3-large', 'embed', 0.00013000, NULL)
+ON CONFLICT (provider, model, kind) DO NOTHING;`;
+
+/**
+ * Phase 4 — budgets as first-class objects (SEC-L9, §26). Spend ceilings
+ * per business_unit | agent per daily | monthly period, evaluated by the
+ * gateway pre-call (hard-stop) and post-call (ops paging). Per-task
+ * ceilings ride tasks.budget_usd (set at spawn).
+ */
+const M_021_BUDGETS = `
+CREATE TABLE IF NOT EXISTS budgets (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  scope_type TEXT NOT NULL CHECK (scope_type IN ('business_unit','agent')),
+  scope_id BIGINT NOT NULL,
+  period TEXT NOT NULL CHECK (period IN ('daily','monthly')),
+  limit_usd NUMERIC(14,6) NOT NULL CHECK (limit_usd >= 0),
+  enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  created_by_user_id BIGINT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (scope_type, scope_id, period)
+);
+CREATE INDEX IF NOT EXISTS budgets_scope_idx ON budgets (scope_type, scope_id);
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS budget_usd NUMERIC(14,6);`;
+
+/**
+ * Phase 4 — gateway feature flag (rollback path: OFF = raw provider
+ * passthrough, zero deploys) + Gateway screen permissions.
+ */
+const M_022_GATEWAY_FLAG_PERMISSIONS = `
+INSERT INTO feature_flags (key, enabled, emergency, description)
+VALUES ('ai_gateway', TRUE, TRUE,
+        'AI Gateway: budgets, usage ledger, rate limits, fallback (OFF = raw provider passthrough)')
+ON CONFLICT (key) DO NOTHING;
+
+INSERT INTO permissions (key) VALUES ('llm.view'), ('budgets.manage') ON CONFLICT (key) DO NOTHING;
+
+INSERT INTO role_permissions (role_id, permission_id)
+SELECT r.id, p.id FROM roles r
+JOIN permissions p ON p.key IN ('llm.view','budgets.manage')
+WHERE r.key IN ('owner','administrator')
+ON CONFLICT DO NOTHING;`;
+
 export const MIGRATIONS: MigrationDef[] = [
   { version: "000", name: "agentos_legacy_baseline", source: M_000_LEGACY_BASELINE },
   { version: "001", name: "schema_migrations", source: M_001_SCHEMA_MIGRATIONS },
@@ -676,4 +770,7 @@ export const MIGRATIONS: MigrationDef[] = [
   { version: "017", name: "workflows_runs", source: M_017_WORKFLOWS },
   { version: "018", name: "events_notifications", source: M_018_EVENTS_NOTIFICATIONS },
   { version: "019", name: "content_publications", source: M_019_CONTENT_PUBLICATIONS },
+  { version: "020", name: "ai_gateway_ledger", source: M_020_AI_GATEWAY_LEDGER },
+  { version: "021", name: "budgets", source: M_021_BUDGETS },
+  { version: "022", name: "gateway_flag_permissions", source: M_022_GATEWAY_FLAG_PERMISSIONS },
 ];

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { dispatch, getTenantConfig, AgentNotRunnableError } from "@/lib/agents/dispatch";
-import { llm } from "@/lib/llm";
+import { ai, BudgetExceededError, LlmProviderError, LlmRateLimitedError } from "@/lib/ai";
 import { sessionOrLegacyBearer } from "@/lib/auth/guards";
 import { rateLimit, clientIp, hitDailyLlmCap } from "@/lib/security/ratelimit";
 import { isFlagEnabled } from "@/lib/settings";
@@ -56,7 +56,7 @@ export async function POST(req: Request) {
   }
 
   try {
-    const result = await dispatch({ llm, getConfig: getTenantConfig }, {
+    const result = await dispatch({ llm: ai, getConfig: getTenantConfig }, {
       tenantId: body.tenantId as number,
       topic: String(body.topic ?? ""),
       channel: String(body.channel ?? ""),
@@ -81,6 +81,21 @@ export async function POST(req: Request) {
       // an expected, audited 409 — not an internal error.
       await writeAudit({ actorType: gate.ctx.user ? "user" : "system", actorId: gate.ctx.user?.id ?? null, action: "agents.run", resource: "agent_runs", result: "denied", requestId, ip, metadata: { tenantId: body.tenantId, reason: e.code } });
       return NextResponse.json({ errors: [{ code: "AGENT_NOT_RUNNABLE", detail: e.code }] }, { status: 409 });
+    }
+    if (e instanceof BudgetExceededError) {
+      // Phase 4 (SEC-L9): spend budget hard-stop — expected, audited 429.
+      await writeAudit({ actorType: gate.ctx.user ? "user" : "system", actorId: gate.ctx.user?.id ?? null, action: "agents.run", resource: "agent_runs", result: "denied", requestId, ip, metadata: { tenantId: body.tenantId, reason: "budget_exceeded", scope: `${e.scopeType}#${e.scopeId}`, period: e.period, limitUsd: e.limitUsd, spentUsd: e.spentUsd } });
+      return NextResponse.json({ errors: [{ code: "BUDGET_EXCEEDED", detail: { scope: `${e.scopeType}#${e.scopeId}`, period: e.period, limitUsd: e.limitUsd, spentUsd: e.spentUsd } }] }, { status: 429 });
+    }
+    if (e instanceof LlmRateLimitedError) {
+      await writeAudit({ actorType: gate.ctx.user ? "user" : "system", actorId: gate.ctx.user?.id ?? null, action: "agents.run", resource: "agent_runs", result: "denied", requestId, ip, metadata: { tenantId: body.tenantId, reason: "llm_rate_limited" } });
+      return NextResponse.json({ errors: [{ code: "LLM_RATE_LIMITED" }] }, { status: 429, headers: { "Retry-After": String(e.retryAfterSec) } });
+    }
+    if (e instanceof LlmProviderError) {
+      // Every model attempt failed (incl. provider quota) — 502, ledgered in
+      // llm_requests by the gateway; run recorded failed by dispatch.
+      await writeAudit({ actorType: gate.ctx.user ? "user" : "system", actorId: gate.ctx.user?.id ?? null, action: "agents.run", resource: "agent_runs", result: "failure", requestId, ip, metadata: { tenantId: body.tenantId, reason: "provider_failed", attempts: e.attempts.length } });
+      return NextResponse.json({ errors: [{ code: "PROVIDER_FAILED", detail: `all ${e.attempts.length} model attempt(s) failed` }] }, { status: 502 });
     }
     await writeAudit({ actorType: gate.ctx.user ? "user" : "system", actorId: gate.ctx.user?.id ?? null, action: "agents.run", resource: "agent_runs", result: "failure", requestId, ip, metadata: { tenantId: body.tenantId } });
     return NextResponse.json({ errors: [{ code: "DISPATCH_FAILED", detail: "internal error" }] }, { status: 500 });

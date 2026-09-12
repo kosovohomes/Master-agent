@@ -21,7 +21,8 @@ export type EventName =
   | "task.escalated"
   | "publish.failed"
   | "publish.succeeded"
-  | "workflow.run_failed";
+  | "workflow.run_failed"
+  | "budget.hard_stop";
 
 /** v1 notification policy: which events page ops, and what the subject says. */
 const RULES: Record<EventName, { subject: (p: Record<string, unknown>) => string } | null> = {
@@ -30,6 +31,9 @@ const RULES: Record<EventName, { subject: (p: Record<string, unknown>) => string
   "publish.failed": { subject: (p) => `Publish failed for draft #${p.draftId} (${p.channel})` },
   "publish.succeeded": { subject: (p) => `Published draft #${p.draftId} to ${p.channel}` },
   "workflow.run_failed": { subject: (p) => `Workflow run failed (${p.workflow})` },
+  "budget.hard_stop": {
+    subject: (p) => `Budget hard-stop: ${p.scope} — spend $${p.spentUsd} hit limit $${p.limitUsd}`,
+  },
 };
 
 async function opsEmail(): Promise<string | null> {

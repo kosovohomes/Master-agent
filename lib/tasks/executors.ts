@@ -20,8 +20,8 @@
  * for tests via makeAgentDispatchHandler / makePublishingSweepHandler; the
  * production registrations happen in registerBuiltins() at import time.
  */
-import type { LLMClient } from "../llm";
-import { llm as defaultLlm } from "../llm";
+import type { LLMClient } from "../ai/types";
+import { ai as defaultLlm } from "../ai";
 import { dispatch, getTenantConfig } from "../agents/dispatch";
 import { routeAgent } from "../agents/core";
 import type { AgentGoal } from "../agents/types";
@@ -95,11 +95,16 @@ export function makeAgentDispatchHandler(deps: {
 
     if (await cancelled()) throw new TaskCancelledError();
 
-    // Step 2 — execute via the registry-driven dispatch (unchanged Phase 2 code).
+    // Step 2 — execute via the registry-driven dispatch (unchanged Phase 2
+    // code; Phase 4 passes the task id so LLM spend attributes to the task
+    // and per-task budget ceilings enforce).
     let draftId: number | null = null;
     let runId: number | null = null;
     await step("execute", async () => {
-      const result = await dispatch({ llm: deps.llm, getConfig: getTenantConfig }, goal);
+      const result = await dispatch(
+        { llm: deps.llm, getConfig: getTenantConfig, attribution: { taskId: task.id } },
+        goal
+      );
       draftId = result.draftId;
       runId = result.runId;
       return { runId: result.runId, agent: result.agent, draftId: result.draftId };

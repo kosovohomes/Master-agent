@@ -1,56 +1,21 @@
-export type ChatMessage = { role: "system" | "user" | "assistant"; content: string };
-
-export type LLMClient = {
-  complete(messages: ChatMessage[], opts?: { model?: string; temperature?: number }): Promise<string>;
-  embed(texts: string[]): Promise<number[][]>;
-};
-
-const DEFAULT_CHAT_MODEL = "gpt-4o-mini";
-const DEFAULT_EMBED_MODEL = "text-embedding-3-small";
-
-function requireKey(): string {
-  const key = process.env.OPENAI_API_KEY;
-  if (!key) throw new Error("OPENAI_API_KEY not set");
-  return key;
-}
-
-export function makeLLM(fetchImpl: typeof fetch = fetch): LLMClient {
-  return {
-    async complete(messages, opts = {}) {
-      const apiKey = requireKey();
-      const model = opts.model ?? process.env.OPENAI_MODEL ?? DEFAULT_CHAT_MODEL;
-      const res = await fetchImpl("https://api.openai.com/v1/chat/completions", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-        body: JSON.stringify({
-          model,
-          temperature: opts.temperature ?? 0.7,
-          messages,
-        }),
-      });
-      if (!res.ok) {
-        const detail = await res.text();
-        throw new Error(`llm complete ${res.status}: ${detail.slice(0, 200)}`);
-      }
-      const json = (await res.json()) as { choices: { message: { content: string } }[] };
-      return json.choices[0]?.message?.content ?? "";
-    },
-    async embed(texts: string[]) {
-      const apiKey = requireKey();
-      const model = process.env.OPENAI_EMBEDDINGS_MODEL ?? DEFAULT_EMBED_MODEL;
-      const res = await fetchImpl("https://api.openai.com/v1/embeddings", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-        body: JSON.stringify({ model, input: texts }),
-      });
-      if (!res.ok) {
-        const detail = await res.text();
-        throw new Error(`llm embed ${res.status}: ${detail.slice(0, 200)}`);
-      }
-      const json = (await res.json()) as { data: { embedding: number[] }[] };
-      return json.data.map((d) => d.embedding);
-    },
-  };
-}
-
-export const llm: LLMClient = makeLLM();
+/**
+ * BACK-COMPAT SHIM (Phase 4). The LLM client moved to lib/ai per the
+ * Phase 0.5 §323 module tree:
+ *   lib/llm.ts  →  lib/ai/providers/openai.ts (+ gateway in lib/ai/gateway.ts)
+ *
+ * This shim re-exports the moved surface for ONE transition phase so old
+ * imports keep compiling. New code MUST import from "@/lib/ai"; the
+ * call-site grep test (tests/call-site-grep-tests.ts) enforces that nothing
+ * outside lib/ai and this shim references the provider. Composition roots
+ * (dispatch, chat route, task executors) already consume the gateway-wrapped
+ * client — see lib/ai/gateway.ts.
+ */
+export {
+  makeOpenAI,
+  makeOpenAI as makeLLM, // legacy alias (tests use it to exercise the raw provider)
+  openai,
+  openai as llm, // legacy alias: the RAW provider — composition roots must NOT use this
+  DEFAULT_CHAT_MODEL,
+  DEFAULT_EMBED_MODEL,
+} from "./ai/providers/openai";
+export type { ChatMessage, LLMClient } from "./ai/types";

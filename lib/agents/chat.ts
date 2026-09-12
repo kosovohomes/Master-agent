@@ -1,4 +1,4 @@
-import type { LLMClient } from "../llm";
+import type { LLMClient } from "../ai/types";
 import type { RetrievedChunk } from "../rag/retrieve";
 import type { TenantCfg } from "./dispatch";
 

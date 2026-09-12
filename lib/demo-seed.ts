@@ -1,5 +1,5 @@
 import { query } from "./db";
-import { llm } from "./llm";
+import { ai as llm } from "./ai"; // Phase 4: demo seeding rides the gateway (ledger + budgets)
 import { addContentSource, ingestText } from "./rag/ingest";
 import { dispatch, getTenantConfig } from "./agents/dispatch";
 import { ensureLegacyMapping } from "./bu";

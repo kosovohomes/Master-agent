@@ -16,7 +16,7 @@
  * effects (no posting, no web calls beyond the LLM itself). The task engine
  * and tool execution arrive with Phase 3+.
  */
-import type { LLMClient } from "../llm";
+import type { LLMClient } from "../ai/types";
 import { createDraft } from "./approval";
 import { generateDraft, systemPromptFor, channelHint } from "./generators";
 
@@ -79,6 +79,8 @@ export function makeGenericLLMExecutor(p: {
   systemPrompt: string;
   agentSlug: string;
   outputSchema?: Record<string, unknown> | null;
+  /** Phase 4 routing policy: per-agent model override (version config). */
+  model?: string;
 }): BoundExecutor {
   return async (ctx, input) => {
     const systemPrompt = [
@@ -92,7 +94,10 @@ export function makeGenericLLMExecutor(p: {
       { role: "system", content: systemPrompt },
       { role: "user", content: `${channelHint(input.channel)}\n\nTopic: ${input.topic}${input.context ? `\nContext: ${input.context}` : ""}` },
     ] as const;
-    const content = await ctx.llm.complete(messages as never, { temperature: 0.7 });
+    const content = await ctx.llm.complete(messages as never, {
+      temperature: 0.7,
+      model: p.model, // undefined → gateway default resolution
+    });
     const { draftId } = await createDraft({
       tenantId: input.tenantId,
       agent: p.agentSlug,

@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
-import { llm } from "@/lib/llm";
+import { ai, BudgetExceededError } from "@/lib/ai";
 import { query } from "@/lib/db";
 import { retrieve } from "@/lib/rag/retrieve";
 import { getTenantConfig } from "@/lib/agents/dispatch";
+import { buIdForLegacyTenant } from "@/lib/agents/registry";
 import { answerChat } from "@/lib/agents/chat";
 import { rateLimit, clientIp, hitDailyLlmCap } from "@/lib/security/ratelimit";
 import { isFlagEnabled } from "@/lib/settings";
@@ -63,16 +64,25 @@ export async function POST(req: Request) {
 
   try {
     const config = await getTenantConfig(body.tenantId as number);
+    // Phase 4: the widget path rides the gateway with BU attribution — chat
+    // answers AND retrieval embeddings are ledgered and budget-enforced.
+    const buId = await buIdForLegacyTenant(body.tenantId as number).catch(() => null);
+    const chatLlm = ai.withAttribution({ businessUnitId: buId, purpose: "chat_answer" });
     const result = await answerChat({
-      llm,
-      retrieve: (p) => retrieve({ embed: (texts) => llm.embed(texts) }, p),
+      llm: chatLlm,
+      retrieve: (p) => retrieve({ embed: (texts) => chatLlm.embed(texts) }, p),
     }, {
       tenantId: body.tenantId as number,
       question: body.question.trim(),
       config,
     });
     return NextResponse.json({ data: result, meta: { ts: new Date().toISOString(), requestId } });
-  } catch {
+  } catch (e) {
+    if (e instanceof BudgetExceededError) {
+      // Public endpoint: a hard-stop is a capacity signal, not an internal error.
+      await writeAudit({ actorType: "anonymous", actorLabel: "ip", action: "chat.answer", resource: "chat", result: "denied", requestId, ip, metadata: { reason: "budget_exceeded", tenantId: body.tenantId, scope: `${e.scopeType}#${e.scopeId}` } });
+      return NextResponse.json({ errors: [{ code: "BUDGET_EXCEEDED" }] }, { status: 429 });
+    }
     return NextResponse.json({ errors: [{ code: "CHAT_FAILED", detail: "internal error" }] }, { status: 500 });
   }
 }
