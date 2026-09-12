@@ -118,8 +118,8 @@ async function activeBudgetsFor(attr: GatewayAttribution): Promise<Array<{ id: n
   }>(
     `SELECT id, scope_type, scope_id, period, limit_usd FROM budgets
      WHERE enabled = TRUE
-       AND (scope_type = 'business_unit' AND scope_id = ANY($1::bigint[]))
-        OR (scope_type = 'agent' AND scope_id = ANY($2::bigint[]))`,
+       AND ((scope_type = 'business_unit' AND scope_id = ANY($1::bigint[]))
+         OR (scope_type = 'agent' AND scope_id = ANY($2::bigint[])))`,
     [
       scopes.filter(([t]) => t === "business_unit").map(([, id]) => id),
       scopes.filter(([t]) => t === "agent").map(([, id]) => id),

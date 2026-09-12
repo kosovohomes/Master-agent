@@ -71,17 +71,24 @@ function stubProvider(): ProviderClient & { calls: Array<{ model?: string }> } {
 
 async function cleanup() {
   try {
-    await query("DELETE FROM llm_requests WHERE agent_slug LIKE $1 OR model LIKE $1 OR model IN ($2, $3) OR business_unit_id >= 9100000", [`${RUN}%`, "pre-call"]).catch(() => undefined);
+    await query("DELETE FROM llm_requests WHERE agent_slug LIKE $1 OR business_unit_id >= 9100000", [`${RUN}%`]).catch(() => undefined);
     if (createdBudgetIds.length) await query("DELETE FROM budgets WHERE id = ANY($1)", [createdBudgetIds]);
     if (createdRunIds.length) await query("DELETE FROM agent_runs WHERE id = ANY($1)", [createdRunIds]);
     if (createdTenantIds.length) await query("DELETE FROM tenants WHERE id = ANY($1)", [createdTenantIds]);
-    await query("DELETE FROM events WHERE name = 'budget.hard_stop' AND payload->>'scope' LIKE $1", [`${RUN}%`]);
-    await query("DELETE FROM notifications WHERE subject LIKE $1", [`%${RUN}%`]);
-    await query("DELETE FROM tasks WHERE idempotency_key LIKE $1", [`notify:%`]).catch(() => undefined);
-    await query("DELETE FROM rate_limit_buckets WHERE key LIKE 'llm:bu:9_2%' OR key LIKE 'llm:bu:9_3%'");
+    if (createdEventIds.length) {
+      // Delivery tasks reference notifications (by id), notifications
+      // reference events (FK) — delete children before parents.
+      await query(
+        "DELETE FROM tasks WHERE idempotency_key IN (SELECT 'notify:' || n.id FROM notifications n WHERE n.event_id = ANY($1))",
+        [createdEventIds]
+      );
+      await query("DELETE FROM notifications WHERE event_id = ANY($1)", [createdEventIds]);
+      await query("DELETE FROM events WHERE id = ANY($1)", [createdEventIds]);
+    }
+    await query("DELETE FROM events WHERE name = 'budget.hard_stop' AND payload->>'scope' LIKE 'agent#91%'");
+    await query("DELETE FROM rate_limit_buckets WHERE key LIKE 'llm:bu:%'");
     await query("UPDATE feature_flags SET enabled = TRUE WHERE key = 'ai_gateway'");
     await query("DELETE FROM model_prices WHERE model IN ($1, $2)", [MODEL, FALLBACK]);
-    void AGENT_SCOPE_ID; void BU_A; void BU_B;
   } catch (e) {
     console.error("cleanup error", e);
   }
@@ -98,12 +105,13 @@ try {
   );
 
   // ---------- 1. flag rollback: ai_gateway OFF = raw passthrough ----------
+  // NOTE: use a model the stub does NOT 429 on (passthrough must succeed).
   await query("UPDATE feature_flags SET enabled = FALSE WHERE key = 'ai_gateway'");
   const passthrough = stubProvider();
   const offGw = makeGatewayClient({ provider: passthrough, alwaysGateway: false });
-  const offOut = await offGw.complete([{ role: "user", content: "hi" }], { model: MODEL });
-  check("flag OFF: provider called directly (rollback path)", offOut === `ok:${MODEL}`);
-  const offRows = await query<{ n: string }>("SELECT count(*)::text AS n FROM llm_requests WHERE model = $1", [MODEL]);
+  const offOut = await offGw.complete([{ role: "user", content: "hi" }], { model: FALLBACK });
+  check("flag OFF: provider called directly (rollback path)", offOut === `ok:${FALLBACK}`);
+  const offRows = await query<{ n: string }>("SELECT count(*)::text AS n FROM llm_requests WHERE model = $1", [FALLBACK]);
   check("flag OFF: no ledger rows (pre-P4 behavior)", offRows[0].n === "0", offRows[0].n);
   await query("UPDATE feature_flags SET enabled = TRUE WHERE key = 'ai_gateway'");
 
@@ -145,14 +153,7 @@ try {
   const budget = await upsertBudget({ scopeType: "agent", scopeId: AGENT_SCOPE_ID, period: "monthly", limitUsd: 0 });
   createdBudgetIds.push(budget.id);
   const gwBudget = makeGatewayClient({ provider: stubProvider(), alwaysGateway: true, ratePerMin: 0 });
-  let blocked = false;
-  try {
-    await gwBudget.complete([{ role: "user", content: "runaway" }], { model: MODEL }).catch((e) => { throw e; });
-  } catch (e) {
-    blocked = e instanceof BudgetExceededError;
-  }
-  // The gateway has no attribution here — budgets attach via attribution.
-  // Re-test with attribution attached:
+  // Attribution attaches the agent scope → the $0 monthly budget blocks pre-provider.
   const attributed = gwBudget.withAttribution({ businessUnitId: BU_A, agentId: AGENT_SCOPE_ID, agentSlug: `b-${RUN}`, purpose: "draft_generation" });
   let blockedAttributed = false;
   try {
@@ -161,7 +162,6 @@ try {
     blockedAttributed = e instanceof BudgetExceededError && e.limitUsd === 0;
   }
   check("budget hard-stop blocks the call pre-provider", blockedAttributed, "expected BudgetExceededError");
-  void blocked;
   const blockRow = (
     await query<{ status: string; error_code: string | null }>(
       "SELECT status, error_code FROM llm_requests WHERE agent_slug = $1 ORDER BY id DESC LIMIT 1",
@@ -233,15 +233,10 @@ try {
     promptTokens: 500, completionTokens: 200, totalTokens: 700, costUsd: 0.011,
   });
   const since = new Date(Date.now() - 60_000);
-  await linkRun({ runId: run[0].id, agentId: null, businessUnitId: null, since });
-  // linkRun with null ids is a no-op by design; attribute via a manual link
-  // for the totals check (dispatch passes agentId/buId):
-  await query(
-    `UPDATE llm_requests SET agent_run_id = $1 WHERE agent_slug = $2`,
-    [run[0].id, `link-${RUN}`]
-  );
+  // Attribution carried BU only (no agent) — linkRun must link by BU branch.
+  await linkRun({ runId: run[0].id, agentId: null, businessUnitId: BU_A, since });
   const totals = await runTotals(run[0].id);
-  check("runTotals sums tokens + cost for the run", totals.promptTokens === 500 && totals.completionTokens === 200 && Math.abs(totals.costUsd - 0.011) < 1e-9, JSON.stringify(totals));
+  check("runTotals sums tokens + cost for the linked run", totals.promptTokens === 500 && totals.completionTokens === 200 && Math.abs(totals.costUsd - 0.011) < 1e-9, JSON.stringify(totals));
 } catch (e) {
   failures++;
   console.error("SUITE ERROR", e);

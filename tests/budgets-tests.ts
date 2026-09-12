@@ -53,6 +53,9 @@ try {
   const daily = await upsertBudget({ scopeType: "business_unit", scopeId: BU, period: "daily", limitUsd: 5 });
   createdBudgetIds.push(daily.id);
   check("same scope, different period = separate object", daily.id !== b1.id);
+  // Re-price monthly below current spend (7) so the hard-stop can fire.
+  const b1low = await upsertBudget({ scopeType: "business_unit", scopeId: BU, period: "monthly", limitUsd: 5 });
+  check("re-pricing keeps the same object", b1low.id === b1.id && b1low.limitUsd === 5);
 
   // ---------- 2. ledger spend + period window ----------
   await recordRequest({
@@ -72,7 +75,7 @@ try {
   try {
     await checkBudgets({ businessUnitId: BU });
   } catch (e) {
-    monthlyBlocked = e instanceof BudgetExceededError && e.scopeType === "business_unit" && e.limitUsd === 30 && e.spentUsd >= 7;
+    monthlyBlocked = e instanceof BudgetExceededError && e.scopeType === "business_unit" && e.limitUsd === 5 && e.spentUsd >= 7;
   }
   check("monthly budget hard-stops (spend >= limit)", monthlyBlocked);
   // Disable monthly, then the daily limit (5 vs spend 7) is what blocks.
@@ -115,10 +118,11 @@ try {
   check("task lifetime ceiling hard-stops runaway tasks", taskBlocked);
 
   // ---------- 5. post-call detection + event cooldown ----------
-  await setBudgetEnabled(b1.id, true); // monthly limit 30, spend 7
+  await setBudgetEnabled(b1.id, true); // monthly, currently re-priced to 5
+  await upsertBudget({ scopeType: "business_unit", scopeId: BU, period: "monthly", limitUsd: 30 });
   const over = await firstOverBudgetAfterCall({ businessUnitId: BU });
   check("post-call: not over when spend < limit", over === null);
-  await query("UPDATE budgets SET limit_usd = 5 WHERE id = $1", [b1.id]);
+  await upsertBudget({ scopeType: "business_unit", scopeId: BU, period: "monthly", limitUsd: 5 });
   const overNow = await firstOverBudgetAfterCall({ businessUnitId: BU });
   check("post-call: detects crossed limit", overNow !== null && overNow.limitUsd === 5);
   const scope = `business_unit#${BU}`;
