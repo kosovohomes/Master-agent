@@ -24,7 +24,8 @@ export type EventName =
   | "workflow.run_failed"
   | "budget.hard_stop"
   | "knowledge.source.fetched"
-  | "knowledge.source.failed";
+  | "knowledge.source.failed"
+  | "connector.content.sync";
 
 /** v1 notification policy: which events page ops, and what the subject says. */
 const RULES: Record<EventName, { subject: (p: Record<string, unknown>) => string } | null> = {
@@ -42,6 +43,10 @@ const RULES: Record<EventName, { subject: (p: Record<string, unknown>) => string
   "knowledge.source.failed": {
     subject: (p) => `Knowledge source #${p.sourceId} fetch failed`,
   },
+  // Phase 6: connector content sync is routine traffic — observable on the
+  // Operations screen but never page-worthy on its own (failures surface as
+  // task.failed / knowledge.source.failed which DO notify).
+  "connector.content.sync": null,
 };
 
 async function opsEmail(): Promise<string | null> {

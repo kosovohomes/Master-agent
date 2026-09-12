@@ -25,6 +25,14 @@
  *       authority/language/lifecycle metadata + agent_runs.citations) ·
  *   025 chunks hybrid retrieval (tsvector leg + chunk_no + GIN) ·
  *   026 knowledge_v2 flag + knowledge.manage permission
+ * Phase 4 (§11 P4, AI gateway — llm_requests ledger, budgets, cost control):
+ *   020 llm_requests + model_prices · 021 budgets + tasks.budget_usd ·
+ *   022 ai_gateway flag + llm.view/budgets.manage permissions
+ * Phase 6 (§11 P13 pulled forward — website connectors, §12/§77/§411, SEC-L4):
+ *   027 website_integrations connector columns (signing/rotation/last_event/
+ *       display_name) + connector_deliveries (signed-webhook receipt log
+ *       + replay cache, UNIQUE (website_id, delivery_id)) ·
+ *   028 connectors flag + connectors.manage permission
  *
  * 000 records the pre-existing AgentOS baseline (the 11 legacy tables) so the
  * ledger is complete even on a database provisioned from empty. On the live
@@ -893,6 +901,70 @@ JOIN permissions p ON p.key = 'knowledge.manage'
 WHERE r.key IN ('owner','administrator')
 ON CONFLICT DO NOTHING;`;
 
+/**
+ * Phase 6 (website connectors, Phase 0.5 §12/§77/§411, SEC-L4 — pulled
+ * forward from roadmap P13 per the Phase 5 report §18):
+ *  - website_integrations gains the connector contract columns: the HMAC
+ *    signing algorithm marker, the previous signing secret (kept for a
+ *    bounded rotation window so rotation is zero-downtime, §77), the
+ *    rotation timestamp, last inbound event stamp, and a display name.
+ *    Signing secrets reuse credentials_encrypted (AES-256-GCM envelope,
+ *    lib/channels.ts).
+ *  - connector_deliveries is the signed-webhook receipt log and replay
+ *    cache: UNIQUE (website_id, delivery_id) rejects duplicate deliveries;
+ *    a FAILED row may be re-recorded so sender retries with the same
+ *    delivery id are processed (only successfully accepted deliveries
+ *    replay-block). Every inbound attempt is logged with its verdict —
+ *    including rejected ones — without ever storing the secret.
+ */
+const M_027_WEBSITE_CONNECTORS = `
+ALTER TABLE website_integrations
+  ADD COLUMN IF NOT EXISTS signing_algo TEXT NOT NULL DEFAULT 'hmac-sha256',
+  ADD COLUMN IF NOT EXISTS previous_credentials_encrypted TEXT,
+  ADD COLUMN IF NOT EXISTS rotated_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS last_event_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS display_name TEXT;
+
+CREATE TABLE IF NOT EXISTS connector_deliveries (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  website_id BIGINT NOT NULL REFERENCES websites(id) ON DELETE CASCADE,
+  integration_id BIGINT REFERENCES website_integrations(id) ON DELETE SET NULL,
+  delivery_id TEXT NOT NULL,
+  event_type TEXT NOT NULL,
+  signature_valid BOOLEAN NOT NULL DEFAULT false,
+  status TEXT NOT NULL DEFAULT 'received'
+    CHECK (status IN ('received','accepted','rejected','failed')),
+  rejection_reason TEXT,
+  payload JSONB,
+  task_id BIGINT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (website_id, delivery_id)
+);
+CREATE INDEX IF NOT EXISTS connector_deliveries_website_idx
+  ON connector_deliveries (website_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS connector_deliveries_integration_idx
+  ON connector_deliveries (integration_id);`;
+
+/**
+ * Phase 6 flag + permission (same pattern as 022/026): the connectors
+ * feature flag gates the entire inbound-webhook surface (OFF = the
+ * integration endpoint 404s, zero deploys rollback); connectors.manage
+ * guards the admin API + Command Center screen (owner + administrator).
+ */
+const M_028_CONNECTORS_FLAG_PERMS = `
+INSERT INTO feature_flags (key, enabled, emergency, description)
+VALUES ('connectors', TRUE, FALSE,
+        'Website connectors: signed inbound webhooks, capability grants, site content sync (OFF = integration endpoint disabled)')
+ON CONFLICT (key) DO NOTHING;
+
+INSERT INTO permissions (key) VALUES ('connectors.manage') ON CONFLICT (key) DO NOTHING;
+
+INSERT INTO role_permissions (role_id, permission_id)
+SELECT r.id, p.id FROM roles r
+JOIN permissions p ON p.key = 'connectors.manage'
+WHERE r.key IN ('owner','administrator')
+ON CONFLICT DO NOTHING;`;
+
 export const MIGRATIONS: MigrationDef[] = [
   { version: "000", name: "agentos_legacy_baseline", source: M_000_LEGACY_BASELINE },
   { version: "001", name: "schema_migrations", source: M_001_SCHEMA_MIGRATIONS },
@@ -921,4 +993,6 @@ export const MIGRATIONS: MigrationDef[] = [
   { version: "024", name: "documents_scoping", source: M_024_DOCUMENTS_SCOPING },
   { version: "025", name: "chunks_hybrid", source: M_025_CHUNKS_HYBRID },
   { version: "026", name: "knowledge_flag_permissions", source: M_026_KNOWLEDGE_FLAG_PERMS },
+  { version: "027", name: "website_connectors", source: M_027_WEBSITE_CONNECTORS },
+  { version: "028", name: "connectors_flag_permissions", source: M_028_CONNECTORS_FLAG_PERMS },
 ];

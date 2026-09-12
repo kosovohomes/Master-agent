@@ -55,6 +55,11 @@ const files = [
   "tests/knowledge-fetchers-tests.ts",
   "tests/knowledge-scopes-tests.ts",
   "tests/knowledge-retrieval-tests.ts",
+  // Phase 6 suites
+  "tests/connectors-crypto-tests.ts",
+  "tests/connectors-service-tests.ts",
+  "tests/connectors-events-tests.ts",
+  "tests/connectors-route-tests.ts",
 ];
 let failures = 0;
 for (const f of files) {
