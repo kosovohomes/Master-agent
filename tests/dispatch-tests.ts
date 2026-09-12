@@ -175,6 +175,10 @@ try {
     body: JSON.stringify(body),
   });
 
+  // Phase 5: pin knowledge_v2 OFF for the legacy route contract (M_026 seeds
+  // it ON), then prove the grounding contract explicitly with the flag ON.
+  await query("UPDATE feature_flags SET enabled = false WHERE key = 'knowledge_v2'");
+
   fetchCalls = 0;
   const h1 = await routeMod.POST(mkReq({ tenantId: tenantB, topic: "gather legal industry news", channel: "x" }));
   const j1 = await h1.json();
@@ -190,6 +194,15 @@ try {
     "SELECT status FROM agent_runs WHERE id = $1", [j1.data.runId]))[0].status === "completed");
   check("route actually invoked the LLM", fetchCalls === 1);
 
+  // knowledge_v2 ON: research grounding adds exactly one provider embed call
+  // (hybrid retrieval embeds the query once) and the result carries citations.
+  await query("UPDATE feature_flags SET enabled = true WHERE key = 'knowledge_v2'");
+  fetchCalls = 0;
+  const h1g = await routeMod.POST(mkReq({ tenantId: tenantB, topic: "gather legal industry news", channel: "x" }));
+  const j1g = await h1g.json();
+  check("route grounding (knowledge_v2 ON) adds exactly one embed call", h1g.status === 200 && fetchCalls === 2, `fetchCalls=${fetchCalls}`);
+  check("grounded research result carries citations array", Array.isArray(j1g?.data?.citations));
+
   const draftsAfterResearch = (await draftsFor(tenantB)).length;
   const runsAfterResearch = (await runsFor(tenantB)).length;
   const h2 = await routeMod.POST(mkReq({ tenantId: tenantB, topic: "gather a pitch for the sale", channel: "chat" }));
@@ -199,7 +212,7 @@ try {
   check("route chat writes a customer_service run",
     (await query<{ agent: string }>("SELECT agent FROM agent_runs WHERE id = $1", [j2.data.runId]))[0].agent === "customer_service");
   check("route chat added exactly one run", (await runsFor(tenantB)).length === runsAfterResearch + 1);
-  check("route chat never calls the LLM", fetchCalls === 1);
+  check("route chat never calls the LLM", fetchCalls === 2);
 
   const draftsAfterChat = (await draftsFor(tenantB)).length;
   const runsAfterChat = (await runsFor(tenantB)).length;
