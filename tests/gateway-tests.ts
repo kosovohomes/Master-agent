@@ -118,15 +118,16 @@ try {
   // ---------- 2. forced-429 → fallback chain → ledger ----------
   const gw = makeGatewayClient({ provider: stubProvider(), fallbackModels: [FALLBACK], alwaysGateway: true, ratePerMin: 0 });
   const attr = { businessUnitId: BU_A, agentSlug: `agent-${RUN}`, purpose: "draft_generation" as const };
-  const out = await gw.complete([{ role: "user", content: "write a thing" }], { model: MODEL });
+  const attributed2 = gw.withAttribution(attr);
+  const out = await attributed2.complete([{ role: "user", content: "write a thing" }], { model: MODEL });
   check("forced-429: fallback model served the call", out === `ok:${FALLBACK}`, out);
   const rows = await query<{
     model: string; status: string; error_code: string | null; attempt_no: number;
     prompt_tokens: number | null; cost_usd: string; latency_ms: number | null;
-    business_unit_id: number | null; agent_slug: string | null;
+    business_unit_id: number | null; agent_slug: string | null; purpose: string | null;
   }>(
     `SELECT model, status, error_code, attempt_no, prompt_tokens, cost_usd::text AS cost_usd,
-            latency_ms, business_unit_id, agent_slug
+            latency_ms, business_unit_id, agent_slug, purpose
      FROM llm_requests WHERE agent_slug = $1 ORDER BY id`,
     [attr.agentSlug!]
   );
@@ -135,16 +136,16 @@ try {
   check("attempt 2: ok row on fallback model", rows[1].status === "ok" && rows[1].model === FALLBACK && rows[1].attempt_no === 2);
   check("usage captured (prompt tokens)", rows[1].prompt_tokens === 1000, String(rows[1].prompt_tokens));
   check("cost computed from model_prices (1000/1000 @ 0.02+0.02)", Math.abs(Number(rows[1].cost_usd) - 0.04) < 1e-9, rows[1].cost_usd);
-  check("attribution persisted (BU + purpose)", rows[1].business_unit_id === BU_A);
+  check("attribution persisted (BU + purpose)", rows[1].business_unit_id === BU_A && rows[1].purpose === "draft_generation");
   check("latency recorded", rows[1].latency_ms !== null);
 
   // ---------- 3. embed path ledgered ----------
-  const buEmbed = BU_B;
-  await gw.embed(["hello world", "second text"]).catch(() => null);
+  const embedClient = gw.withAttribution({ businessUnitId: BU_B, agentSlug: `e-${RUN}`, purpose: "retrieval" });
+  await embedClient.embed(["hello world", "second text"]).catch(() => null);
   const embedRow = (
     await query<{ status: string; kind: string; prompt_tokens: number | null }>(
       "SELECT status, kind, prompt_tokens FROM llm_requests WHERE business_unit_id = $1 AND kind = 'embed' ORDER BY id DESC LIMIT 1",
-      [buEmbed]
+      [BU_B]
     )
   )[0];
   check("embed call ledgered (kind=embed, ok)", embedRow && embedRow.status === "ok" && embedRow.prompt_tokens === 100, JSON.stringify(embedRow));
