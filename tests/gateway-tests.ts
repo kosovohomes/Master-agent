@@ -176,9 +176,10 @@ try {
   );
   if (ev[0]) createdEventIds.push(ev[0].id);
   check("hard-stop event emitted on the bus (ops paging)", ev.length === 1, JSON.stringify(ev[0]?.payload));
-  // Disabling the budget releases the scope (kill-switch off).
+  // Disabling the budget releases the brake (kill-switch off); use the
+  // succeed-model since gwBudget has no fallback chain configured.
   await setBudgetEnabled(budget.id, false);
-  const after = await attributed.complete([{ role: "user", content: "again" }], { model: MODEL });
+  const after = await attributed.complete([{ role: "user", content: "again" }], { model: FALLBACK });
   check("disabled budget no longer blocks", after === `ok:${FALLBACK}`);
   await setBudgetEnabled(budget.id, true);
 
