@@ -221,6 +221,8 @@ try {
   check("all attempts failed → LlmProviderError with both attempts", providerFailed && attemptsSeen === 2, String(attemptsSeen));
 
   // ---------- 7. linkRun + runTotals (run accounting) ----------
+  // Dedicated BU so the (BU, since) window matches ONLY this suite's row.
+  const BU_LINK = 9_600_000 + Math.floor(Math.random() * 100_000);
   const tenant = await query<{ id: number }>("INSERT INTO tenants (slug, name) VALUES ($1, $2) RETURNING id", [`gw-${RUN}`, "GW Suite Tenant"]);
   createdTenantIds.push(tenant[0].id);
   const run = await query<{ id: number }>(
@@ -229,14 +231,14 @@ try {
     [tenant[0].id, "gw-suite-hash"]
   );
   createdRunIds.push(run[0].id);
+  const since = new Date(Date.now() - 60_000);
   await recordRequest({
     provider: "openai", kind: "chat", model: MODEL, status: "ok",
-    attribution: { businessUnitId: BU_A, agentSlug: `link-${RUN}` },
+    attribution: { businessUnitId: BU_LINK, agentSlug: `link-${RUN}` },
     promptTokens: 500, completionTokens: 200, totalTokens: 700, costUsd: 0.011,
   });
-  const since = new Date(Date.now() - 60_000);
   // Attribution carried BU only (no agent) — linkRun must link by BU branch.
-  await linkRun({ runId: run[0].id, agentId: null, businessUnitId: BU_A, since });
+  await linkRun({ runId: run[0].id, agentId: null, businessUnitId: BU_LINK, since });
   const totals = await runTotals(run[0].id);
   check("runTotals sums tokens + cost for the linked run", totals.promptTokens === 500 && totals.completionTokens === 200 && Math.abs(totals.costUsd - 0.011) < 1e-9, JSON.stringify(totals));
 } catch (e) {
