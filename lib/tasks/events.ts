@@ -28,6 +28,8 @@ export type EventName =
   | "connector.content.sync"
   | "research.finding"
   | "research.escalated"
+  | "seo.recommendation"
+  | "seo.scan"
   | "content.item.created"
   | "content.state_changed"
   | "content.approved"
@@ -59,6 +61,11 @@ const RULES: Record<EventName, { subject: (p: Record<string, unknown>) => string
   "research.escalated": {
     subject: (p) => `Research item #${p.itemId} escalated (${p.agentSlug}) — needs human review`,
   },
+  // Phase 9: SEO workforce — recommendations land on the /seo screen (the
+  // sink); no per-recommendation notification fanout in v1 (a high-risk
+  // notification policy rides the P9+ notification-policy pass).
+  "seo.recommendation": null,
+  "seo.scan": null,
   // Phase 8: content workforce — routine lifecycle traffic stays on the bus
   // without paging; a REJECTED item is material human feedback worth an
   // ops notification; approval itself is visible on the Approvals screen.

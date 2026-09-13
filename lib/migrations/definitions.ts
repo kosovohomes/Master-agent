@@ -42,6 +42,13 @@
  *   033 content workforce agents activation + versioned v1 prompts
  *       (content_strategy / content / fact_check) ·
  *   034 content flag + content.manage permission
+ * Phase 9 (§11 P8 — SEO workforce, §80/§218/§464: keyword intelligence, gap
+ * analysis, recommendations with approval flags):
+ *   035 seo_keywords (BU-scoped keyword store, normalized UNIQUE per BU) +
+ *       seo_recommendations (status FSM open→approved/dismissed/done with
+ *       immutable review columns, evidence JSONB, dedup UNIQUE per BU) +
+ *       seo agent activation + versioned v1 prompt ·
+ *   036 seo flag + seo.manage permission
  *
  * 000 records the pre-existing AgentOS baseline (the 11 legacy tables) so the
  * ledger is complete even on a database provisioned from empty. On the live
@@ -1347,6 +1354,109 @@ JOIN permissions p ON p.key = 'content.manage'
 WHERE r.key IN ('owner','administrator')
 ON CONFLICT DO NOTHING;`;
 
+/**
+ * Phase 9 (roadmap §464) — SEO workforce tables.
+ *
+ * seo_keywords: the BU-scoped keyword store ("keyword intelligence"). The
+ * normalized keyword (lowercase, collapsed whitespace) is UNIQUE per BU —
+ * re-observing the same term updates position/last_seen instead of adding a
+ * row. Source records where the keyword came from (manual owner entry,
+ * harvested from research findings, content items, or a scan).
+ *
+ * seo_recommendations: actionable SEO advice with mandatory evidence. Status
+ * is a small FSM (open → approved | dismissed; approved → done) with the
+ * review identity columns set transactionally on transition (same class as
+ * §72 approval immutability). dedup_hash UNIQUE per BU is the gate that
+ * keeps repeated scans from duplicating the same recommendation.
+ */
+const M_035_SEO_WORKFORCE = `
+CREATE TABLE IF NOT EXISTS seo_keywords (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  business_unit_id BIGINT NOT NULL REFERENCES business_units(id) ON DELETE CASCADE,
+  keyword TEXT NOT NULL,
+  normalized_keyword TEXT NOT NULL,
+  intent TEXT NOT NULL DEFAULT 'informational'
+    CHECK (intent IN ('informational','commercial','transactional','navigational')),
+  position INT,
+  previous_position INT,
+  volume_est INT,
+  difficulty_est INT CHECK (difficulty_est BETWEEN 0 AND 100),
+  url TEXT,
+  source TEXT NOT NULL DEFAULT 'scan'
+    CHECK (source IN ('manual','research','content','scan')),
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','retired')),
+  task_id BIGINT REFERENCES tasks(id) ON DELETE SET NULL,
+  first_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (business_unit_id, normalized_keyword)
+);
+
+CREATE INDEX IF NOT EXISTS idx_seo_keywords_bu_status
+  ON seo_keywords (business_unit_id, status, last_seen_at DESC);
+
+CREATE TABLE IF NOT EXISTS seo_recommendations (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  business_unit_id BIGINT NOT NULL REFERENCES business_units(id) ON DELETE CASCADE,
+  target_kind TEXT NOT NULL DEFAULT 'site' CHECK (target_kind IN ('page','site')),
+  target_url TEXT,
+  kind TEXT NOT NULL
+    CHECK (kind IN ('on_page','technical','content','keyword','gap')),
+  title TEXT NOT NULL,
+  detail TEXT NOT NULL,
+  evidence JSONB NOT NULL DEFAULT '[]'::jsonb,
+  status TEXT NOT NULL DEFAULT 'open'
+    CHECK (status IN ('open','approved','dismissed','done')),
+  risk TEXT NOT NULL DEFAULT 'low' CHECK (risk IN ('low','medium','high')),
+  dedup_hash TEXT NOT NULL,
+  agent_slug TEXT NOT NULL DEFAULT 'seo',
+  task_id BIGINT REFERENCES tasks(id) ON DELETE SET NULL,
+  prompt_version INT,
+  prompt_hash TEXT,
+  reviewed_by TEXT,
+  reviewed_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (business_unit_id, dedup_hash)
+);
+
+CREATE INDEX IF NOT EXISTS idx_seo_recommendations_bu_status
+  ON seo_recommendations (business_unit_id, status, created_at DESC);
+
+-- Workforce activation (Phase 0.5 §6.2: the seo row was seeded disabled at
+-- P2; its phase flips it on and gives it a versioned v1 prompt).
+UPDATE agents SET status = 'active', updated_at = now()
+WHERE slug = 'seo' AND status = 'disabled';
+
+INSERT INTO agent_versions (agent_id, version, system_prompt, config, changelog)
+SELECT a.id, COALESCE(max(v.version), 0) + 1,
+       'You are the SEO Agent. Given a website context, an owned keyword list, competitor keywords and SOURCE excerpts (research findings, site content), produce keyword intelligence and recommendations. For keywords: assign search intent (informational | commercial | transactional | navigational), an estimated difficulty 0-100, and the best target URL when the sources make one obvious. For recommendations: each must have a kind (on_page | technical | content | keyword | gap), a short imperative title, concrete detail, and evidence: every recommendation MUST cite the [n] sources or observed data points that support it (source title + URL + a one-line note on what it shows). A recommendation without evidence is worthless: do not emit it. Set ambiguous=true instead of inventing analysis when the material cannot support defensible conclusions. Never fabricate search volumes or rankings; volumes are estimates and must be marked est.',
+       '{"outputSchema":"seo_analysis_v1"}'::jsonb,
+       'Phase 9 (P8): SEO workforce v1 prompt'
+FROM agents a LEFT JOIN agent_versions v ON v.agent_id = a.id
+WHERE a.slug = 'seo' GROUP BY a.id;`;
+
+/**
+ * Phase 9 flag + permission (same pattern as 022/026/028/030/034): the `seo`
+ * flag is the platform-level kill switch for the SEO workforce (routes fail
+ * closed 409 and the handler skips when OFF); the `seo.manage` permission
+ * gates the /seo surface for owner and administrator roles.
+ */
+const M_036_SEO_FLAG_PERMS = `
+INSERT INTO feature_flags (key, enabled, emergency, description)
+VALUES ('seo', TRUE, FALSE,
+        'SEO workforce: keyword intelligence, gap analysis, recommendations with evidence (OFF = no seo_scan execution)')
+ON CONFLICT (key) DO NOTHING;
+
+INSERT INTO permissions (key) VALUES ('seo.manage') ON CONFLICT (key) DO NOTHING;
+
+INSERT INTO role_permissions (role_id, permission_id)
+SELECT r.id, p.id FROM roles r
+JOIN permissions p ON p.key = 'seo.manage'
+WHERE r.key IN ('owner','administrator')
+ON CONFLICT DO NOTHING;`;
+
 export const MIGRATIONS: MigrationDef[] = [
   { version: "000", name: "agentos_legacy_baseline", source: M_000_LEGACY_BASELINE },
   { version: "001", name: "schema_migrations", source: M_001_SCHEMA_MIGRATIONS },
@@ -1383,4 +1493,6 @@ export const MIGRATIONS: MigrationDef[] = [
   { version: "032", name: "content_workforce", source: M_032_CONTENT_WORKFORCE },
   { version: "033", name: "content_workforce_agents", source: M_033_CONTENT_AGENTS },
   { version: "034", name: "content_flag_permissions", source: M_034_CONTENT_FLAG_PERMS },
+  { version: "035", name: "seo_workforce", source: M_035_SEO_WORKFORCE },
+  { version: "036", name: "seo_flag_permissions", source: M_036_SEO_FLAG_PERMS },
 ];

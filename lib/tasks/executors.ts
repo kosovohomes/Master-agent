@@ -27,6 +27,7 @@ import { makeKnowledgeFetchHandler } from "../knowledge/tasks";
 import { knowledgeFetcher } from "../knowledge/fetchers";
 import { registerResearchHandlers } from "../research/tasks";
 import { registerContentHandlers } from "../content/tasks";
+import { registerSeoHandlers } from "../seo/tasks";
 import { dispatch, getTenantConfig } from "../agents/dispatch";
 import { routeAgent } from "../agents/core";
 import type { AgentGoal } from "../agents/types";
@@ -348,6 +349,21 @@ export function registerBuiltins(): void {
         businessUnitId: task.business_unit_id,
         taskId: task.id,
         purpose: "content",
+      });
+    }
+    return builtinLlm;
+  });
+  // Phase 9: SEO workforce — the analysis leg rides the gateway with
+  // per-task attribution (BU + task, purpose="seo") so budget ceilings and
+  // the llm_requests ledger cover the keyword/gap analysis like every other
+  // workforce LLM leg.
+  registerSeoHandlers((task: { business_unit_id: number | null; id: number }) => {
+    const gateway = builtinLlm as LLMClient & Partial<GatewayClient>;
+    if (typeof gateway.withAttribution === "function") {
+      return gateway.withAttribution({
+        businessUnitId: task.business_unit_id,
+        taskId: task.id,
+        purpose: "seo",
       });
     }
     return builtinLlm;
