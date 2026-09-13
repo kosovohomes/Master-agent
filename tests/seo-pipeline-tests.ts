@@ -35,6 +35,7 @@ function ctx(overrides: Partial<SeoScanContext> = {}): SeoScanContext {
     researchExcerpts: [],
     contentTitles: [],
     competitorNames: [],
+    competitorUrls: new Map(),
     competitorKeywords: [],
     ...overrides,
   };
@@ -81,11 +82,18 @@ check("harvest: capped at MAX_HARVEST=40", many.length <= 40);
 // ---------- deterministic recommendations ----------
 const gapRecs = deterministicRecommendations(ctx({
   competitorNames: ["RivalCo"],
+  competitorUrls: new Map([["RivalCo", "https://rivalco.example"]]),
   competitorKeywords: ["rivalco warranty program", "rivalco financing"],
 }));
-check("gap: one recommendation per untracked competitor term", gapRecs.filter((r) => r.kind === "gap").length === 2);
-check("gap: every recommendation carries evidence", gapRecs.every((r) => r.evidence.length >= 1 && r.evidence.every((e) => e.label.trim() !== "" && e.note.trim() !== "")));
-check("gap: evidence notes the gap explicitly", gapRecs.every((r) => r.evidence.some((e) => e.note.includes("gap"))));
+check("gap: brand rule + one recommendation per untracked competitor term",
+  gapRecs.filter((r) => r.kind === "gap").length === 3,
+  `n=${gapRecs.length}`);
+check("gap: brand rec cites the registry entry",
+  gapRecs.some((r) => r.title.includes('"RivalCo"') && r.evidence.some((e) => e.label.includes("Competitor registry") && e.url === "https://rivalco.example")));
+check("gap: every recommendation carries evidence",
+  gapRecs.every((r) => r.evidence.length >= 1 && r.evidence.every((e) => e.label.trim() !== "" && e.note.trim() !== "")));
+check("gap: term recs name the term in the title",
+  gapRecs.filter((r) => r.title.includes("rivalco warranty program") || r.title.includes("rivalco financing")).length === 2);
 
 const covered = deterministicRecommendations(ctx({
   researchExcerpts: [
@@ -95,6 +103,14 @@ const covered = deterministicRecommendations(ctx({
 }));
 check("coverage: finding already covered by a content item is skipped",
   !covered.some((r) => r.detail.includes("Housing prices cooling")));
+
+// brand coverage: a content item overlapping the competitor brand suppresses the brand rule
+const brandCovered = deterministicRecommendations(ctx({
+  competitorNames: ["RivalCo"],
+  contentTitles: [{ id: 5, title: "RivalCo versus our modular stack", status: "DRAFT" }],
+}));
+check("gap: brand rule suppressed when content covers the brand",
+  !brandCovered.some((r) => r.title.includes('"RivalCo"')));
 
 const coverageRecs = deterministicRecommendations(ctx({
   researchExcerpts: [

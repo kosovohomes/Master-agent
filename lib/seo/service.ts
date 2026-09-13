@@ -426,6 +426,8 @@ export interface SeoScanContext {
   }>;
   contentTitles: Array<{ id: number; title: string; status: string }>;
   competitorNames: string[];
+  /** Competitor name → registry URL (evidence for brand-gap rules). */
+  competitorUrls: Map<string, string | null>;
   competitorKeywords: string[];
 }
 
@@ -477,6 +479,7 @@ export async function loadScanContext(businessUnitId: number): Promise<SeoScanCo
     [businessUnitId]
   );
   const competitorNames = comps.map((c) => c.name);
+  const competitorUrls = new Map(comps.map((c) => [c.name, c.url] as const));
   // Competitor keyword seeds: competitor names themselves + title fragments
   // harvested from their detected events (deterministic, no fabrication).
   const events = await query<{ title: string }>(
@@ -501,6 +504,7 @@ export async function loadScanContext(businessUnitId: number): Promise<SeoScanCo
     researchExcerpts,
     contentTitles,
     competitorNames,
+    competitorUrls,
     competitorKeywords: [...new Set(competitorKeywords)].slice(0, 12),
   };
 }

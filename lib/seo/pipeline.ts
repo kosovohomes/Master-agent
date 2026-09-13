@@ -168,29 +168,80 @@ const MAX_DETERMINISTIC = 6;
 
 export function deterministicRecommendations(ctx: SeoScanContext): SeoRecommendationDraft[] {
   const out: SeoRecommendationDraft[] = [];
-  const owned = new Set(ctx.ownedKeywords.map((k) => k.normalizedKeyword));
+  const owned = new Map(ctx.ownedKeywords.map((k) => [k.normalizedKeyword, k]));
   const contentText = ctx.contentTitles.map((c) => normalizeKeyword(c.title)).join(" | ");
 
-  // Rule 1 — keyword gap: competitor-derived terms the store does not track.
-  // Evidence = the competitor fragment itself (harvested from a tracked
-  // competitor event) + the competitor registry names.
+  // Rule 1 — brand gap: a tracked competitor with NO content item covering
+  // its brand term is a standing comparison/alternative-page opportunity.
+  // Evidence: the competitor registry entry + the keyword-store observation.
+  // Fires consistently until content actually covers the brand (dedup keeps
+  // one row per competitor), which is the point: the advice is still open.
+  for (const name of ctx.competitorNames) {
+    if (out.length >= MAX_DETERMINISTIC) break;
+    const trimmed = name.trim();
+    if (trimmed === "") continue;
+    const normalized = normalizeKeyword(trimmed);
+    const covered = contentText
+      .split(" | ")
+      .some((t) => t.length > 0 && overlap(normalized, t));
+    if (covered) continue;
+    const kwRow = owned.get(normalized);
+    const evidence: SeoRecommendationDraft["evidence"] = [
+      {
+        label: `Competitor registry: ${trimmed}`,
+        url: ctx.competitorUrls.get(trimmed) ?? ctx.websiteUrl,
+        note: `The competitor registry tracks "${trimmed}" as an active competitor.`,
+      },
+      {
+        label: `Keyword store: "${normalized}"`,
+        url: null,
+        note: kwRow
+          ? `The keyword store tracks the brand term (source: ${kwRow.source}) with no target URL assigned.`
+          : "The brand term is not yet tracked in the keyword store.",
+      },
+    ];
+    out.push({
+      kind: "gap",
+      title: `Create comparison content targeting competitor brand "${trimmed}"`,
+      detail:
+        `The competitor registry tracks "${trimmed}", but no content item covers this brand term. ` +
+        `Comparison and alternative pages ("us vs ${trimmed}") are a proven route for high-intent ` +
+        `search traffic. Route a brief through the content workforce once a positioning angle exists.`,
+      evidence,
+      risk: "low",
+      targetKind: "site",
+      targetUrl: ctx.websiteUrl,
+    });
+  }
+
+  // Rule 2 — competitor-term gap: event-derived competitor terms whose
+  // keyword-store row has no target URL yet. Evidence = the tracked activity
+  // fragment + the store observation. (Pre-LLM scans still surface these.)
   for (const ck of ctx.competitorKeywords) {
     if (out.length >= MAX_DETERMINISTIC) break;
     const normalized = normalizeKeyword(ck);
-    if (normalized === "" || owned.has(normalized)) continue;
+    if (normalized === "") continue;
+    const kwRow = owned.get(normalized);
+    if (kwRow?.url) continue; // already targeted — no gap
     const competitor = ctx.competitorNames.find((n) => normalizeKeyword(n).length > 0) ?? null;
     out.push({
       kind: "gap",
-      title: `Close keyword gap: "${ck}"`,
+      title: `Evaluate targeting "${ck}"`,
       detail:
-        `Competitor intelligence surfaces the term "${ck}", which is not in the owned keyword ` +
-        `store. Evaluate it for targeting (content, landing page or category page) and track ` +
-        `it once a target exists. Evidence comes from monitored competitor activity, not search-volume estimates.`,
+        `Competitor intelligence surfaces the term "${ck}", which has no target URL in the keyword ` +
+        `store. Evaluate it for targeting (content, landing page or category page) and assign the ` +
+        `target once a decision exists. Evidence comes from monitored competitor activity, not ` +
+        `search-volume estimates.`,
       evidence: [
         {
           label: competitor ? `Competitor intelligence: ${competitor}` : "Competitor intelligence",
           url: ctx.websiteUrl,
-          note: `The term "${ck}" appears in tracked competitor activity but not in the owned keyword store (gap).`,
+          note: `The term "${ck}" appears in tracked competitor activity.`,
+        },
+        {
+          label: `Keyword store: "${normalized}"`,
+          url: null,
+          note: kwRow ? `Tracked (source: ${kwRow.source}) with no target URL assigned.` : "Not yet tracked in the keyword store.",
         },
       ],
       risk: "low",
@@ -199,7 +250,7 @@ export function deterministicRecommendations(ctx: SeoScanContext): SeoRecommenda
     });
   }
 
-  // Rule 2 — content coverage: strong research findings with no matching
+  // Rule 3 — content coverage: strong research findings with no matching
   // content item. Evidence = the finding itself (title + source URL).
   for (const r of ctx.researchExcerpts) {
     if (out.length >= MAX_DETERMINISTIC) break;

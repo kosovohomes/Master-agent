@@ -31,6 +31,7 @@ import {
   type SeoPrompt,
 } from "./pipeline";
 import {
+  listKeywords,
   loadScanContext,
   recordRecommendation,
   upsertKeyword,
@@ -163,8 +164,12 @@ export function makeSeoScanHandler(deps: { llm: SeoLlm }): TaskHandler {
     });
 
     // Step 3 — recommendations: deterministic rules ALWAYS (evidence-backed
-    // by construction); LLM advice adds on top when funded.
+    // by construction); LLM advice adds on top when funded. The keyword store
+    // is RE-READ here so the gap rules see the post-harvest state (a brand
+    // term this scan just harvested is "tracked, no target URL" — exactly
+    // what the rules advise on).
     await step("recommendations", async () => {
+      ctx.ownedKeywords = await listKeywords({ businessUnitId, status: "active", limit: 500 });
       const fp = fingerprint(prompt);
       const drafts = [...deterministicRecommendations(ctx), ...llmRecs];
       for (const draft of drafts) {
