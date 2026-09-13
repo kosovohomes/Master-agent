@@ -26,6 +26,7 @@ import { ai as defaultLlm } from "../ai";
 import { makeKnowledgeFetchHandler } from "../knowledge/tasks";
 import { knowledgeFetcher } from "../knowledge/fetchers";
 import { registerResearchHandlers } from "../research/tasks";
+import { registerContentHandlers } from "../content/tasks";
 import { dispatch, getTenantConfig } from "../agents/dispatch";
 import { routeAgent } from "../agents/core";
 import type { AgentGoal } from "../agents/types";
@@ -333,6 +334,20 @@ export function registerBuiltins(): void {
         taskId: task.id,
         agentSlug: (task.payload as { agentSlug?: string }).agentSlug ?? "research",
         purpose: "research",
+      });
+    }
+    return builtinLlm;
+  });
+  // Phase 8: content workforce — strategy→content→fact_check rides the
+  // gateway with per-task attribution (BU + task, purpose="content") so the
+  // three-step chain is budgeted and ledgered like every other LLM leg.
+  registerContentHandlers((task: { business_unit_id: number | null; id: number }) => {
+    const gateway = builtinLlm as LLMClient & Partial<GatewayClient>;
+    if (typeof gateway.withAttribution === "function") {
+      return gateway.withAttribution({
+        businessUnitId: task.business_unit_id,
+        taskId: task.id,
+        purpose: "content",
       });
     }
     return builtinLlm;

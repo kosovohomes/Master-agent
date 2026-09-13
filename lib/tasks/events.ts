@@ -27,7 +27,11 @@ export type EventName =
   | "knowledge.source.failed"
   | "connector.content.sync"
   | "research.finding"
-  | "research.escalated";
+  | "research.escalated"
+  | "content.item.created"
+  | "content.state_changed"
+  | "content.approved"
+  | "content.rejected";
 
 /** v1 notification policy: which events page ops, and what the subject says. */
 const RULES: Record<EventName, { subject: (p: Record<string, unknown>) => string } | null> = {
@@ -54,6 +58,15 @@ const RULES: Record<EventName, { subject: (p: Record<string, unknown>) => string
   "research.finding": null,
   "research.escalated": {
     subject: (p) => `Research item #${p.itemId} escalated (${p.agentSlug}) — needs human review`,
+  },
+  // Phase 8: content workforce — routine lifecycle traffic stays on the bus
+  // without paging; a REJECTED item is material human feedback worth an
+  // ops notification; approval itself is visible on the Approvals screen.
+  "content.item.created": null,
+  "content.state_changed": null,
+  "content.approved": null,
+  "content.rejected": {
+    subject: (p) => `Content item #${p.itemId} rejected (${p.to}) — reviewer left a decision reason`,
   },
 };
 

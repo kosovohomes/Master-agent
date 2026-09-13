@@ -10,12 +10,24 @@ import { useCallback, useEffect, useState } from "react";
  */
 type Draft = { id: number; tenant_id: number; agent: string; channel: string; content: string; status: string; review_notes: string | null };
 type Bu = { id: number; name: string; legacyTenantId: number | null };
+type ContentReview = {
+  id: number;
+  businessUnitId: number;
+  type: string;
+  title: string | null;
+  lifecycle: string;
+  brief: { riskLevel?: string; requestedAction?: string; researchItemId?: number };
+  currentVersionId: number | null;
+  updatedAt: string;
+};
 
 export default function ApprovalsPage() {
   const [bus, setBus] = useState<Bu[]>([]);
   const [selectedBu, setSelectedBu] = useState("");
   const [drafts, setDrafts] = useState<Draft[]>([]);
+  const [contentReviews, setContentReviews] = useState<ContentReview[]>([]);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const [canApprove, setCanApprove] = useState(false);
   const [canSchedule, setCanSchedule] = useState(false);
 
@@ -40,9 +52,37 @@ export default function ApprovalsPage() {
     if (!r.ok) { setError(`Load failed (${r.status})`); return; }
     const data = (await r.json()) as { data?: Draft[] };
     setDrafts(data.data ?? []);
+
+    // Phase 8: approval center v2 — content items in REVIEW are the new
+    // pending queue (immutable decision rows; see /api/admin/content/[id]/decide).
+    const cq = await fetch("/api/admin/content?lifecycle=REVIEW");
+    if (cq.ok) {
+      const cj = (await cq.json()) as { data?: { items?: ContentReview[] } };
+      setContentReviews(cj.data?.items ?? []);
+    } else {
+      setContentReviews([]);
+    }
   }, []);
 
   useEffect(() => { void load(""); }, [load]);
+
+  async function decideContent(id: number, decision: "approve" | "reject" | "request_changes") {
+    setError(""); setNotice("");
+    const comment = decision === "approve" ? "" : (window.prompt(decision === "reject" ? "Rejection reason (required)" : "What should change? (required)", "") ?? "");
+    if (decision !== "approve" && comment.trim() === "") { setError("A reason is required to reject or request changes."); return; }
+    const r = await fetch(`/api/admin/content/${id}/decide`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ decision, comment: comment || null }),
+    });
+    if (!r.ok) {
+      const j = (await r.json().catch(() => ({}))) as { errors?: { code?: string; detail?: string }[] };
+      setError(`${j.errors?.[0]?.code ?? r.status}${j.errors?.[0]?.detail ? ` — ${j.errors[0].detail}` : ""}`);
+      return;
+    }
+    setNotice(`Content item #${id}: ${decision} recorded.`);
+    await load(selectedBu ? (bus.find((b) => String(b.id) === selectedBu)?.legacyTenantId ? String(bus.find((b) => String(b.id) === selectedBu)?.legacyTenantId) : "") : "");
+  }
 
   async function act(id: number, action: "approve" | "reject" | "schedule") {
     const comment = action === "reject" ? (window.prompt("Rejection note", "") ?? "") : undefined;
@@ -69,6 +109,31 @@ export default function ApprovalsPage() {
       </header>
 
       {error && <div className="cc-card text-sm font-medium" style={{ borderColor: "var(--danger)", color: "var(--danger)" }}>{error}</div>}
+      {notice && <div className="cc-card text-sm">{notice}</div>}
+
+      {contentReviews.length > 0 && (
+        <section className="space-y-3">
+          <h2 className="text-sm font-semibold" style={{ color: "var(--muted)" }}>CONTENT ITEMS — APPROVAL CENTER V2 (Phase 8)</h2>
+          {contentReviews.map((c) => (
+            <article key={`c-${c.id}`} className="cc-card">
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-sm font-medium">
+                  #{c.id} · {c.title ?? "(untitled)"} · {c.type}
+                  {c.brief.researchItemId != null ? ` · from research #${c.brief.researchItemId}` : ""}
+                </p>
+                <span className={`cc-badge ${c.brief.riskLevel === "high" ? "cc-badge-danger" : c.brief.riskLevel === "low" ? "cc-badge-ok" : "cc-badge-warn"}`}>
+                  REVIEW · risk {c.brief.riskLevel ?? "medium"}
+                </span>
+              </div>
+              <div className="mt-3 flex gap-2">
+                <button className="cc-btn cc-btn-primary text-xs" disabled={!canApprove} onClick={() => void decideContent(c.id, "approve")}>Approve</button>
+                <button className="cc-btn text-xs" disabled={!canApprove} onClick={() => void decideContent(c.id, "request_changes")}>Request changes</button>
+                <button className="cc-btn cc-btn-danger text-xs" disabled={!canApprove} onClick={() => void decideContent(c.id, "reject")}>Reject</button>
+              </div>
+            </article>
+          ))}
+        </section>
+      )}
 
       <div className="cc-card flex items-end gap-3">
         <div className="flex-1">

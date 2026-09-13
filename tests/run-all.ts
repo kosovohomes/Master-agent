@@ -65,6 +65,10 @@ const files = [
   "tests/research-pipeline-tests.ts",
   "tests/research-service-tests.ts",
   "tests/research-tasks-tests.ts",
+  // Phase 8 suites (content workforce)
+  "tests/content-lifecycle-tests.ts",
+  "tests/content-service-tests.ts",
+  "tests/content-tasks-tests.ts",
 ];
 let failures = 0;
 for (const f of files) {

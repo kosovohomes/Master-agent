@@ -70,15 +70,15 @@ try {
       const eLedger = await pool.query("SELECT version FROM schema_migrations ORDER BY version");
       check("empty-db: ledger complete (11 versions incl. legacy baseline)", eLedger.rowCount === MIGRATIONS.length, `rows=${eLedger.rowCount}`);
       const tables = await pool.query(
-        `SELECT tablename FROM pg_tables WHERE schemaname='public' AND tablename IN ('users','sessions','roles','audit_logs','business_units','websites','website_integrations','website_capabilities','feature_flags','system_settings','tenant_usage_daily','connector_deliveries','research_schedules','research_items','competitors','competitor_events')`
+        `SELECT tablename FROM pg_tables WHERE schemaname='public' AND tablename IN ('users','sessions','roles','audit_logs','business_units','websites','website_integrations','website_capabilities','feature_flags','system_settings','tenant_usage_daily','connector_deliveries','research_schedules','research_items','competitors','competitor_events','content_items','content_versions','approval_actions')`
       );
-      check("empty-db: Phase 1+7 tables exist", tables.rowCount === 16, `found=${tables.rowCount}`);
+      check("empty-db: Phase 1+8 tables exist", tables.rowCount === 19, `found=${tables.rowCount}`);
       const buCount = await pool.query("SELECT count(*)::int AS n FROM business_units");
       check("empty-db: backfill no-op on zero tenants", buCount.rows[0].n === 0);
       const seededRoles = await pool.query("SELECT count(*)::int AS n FROM roles WHERE is_active");
       check("empty-db: RBAC seed present (4 active roles)", seededRoles.rows[0].n === 4);
       const seededFlags = await pool.query("SELECT count(*)::int AS n FROM feature_flags");
-      check("empty-db: flags seed present (7 incl. ai_gateway + knowledge_v2 + connectors + research)", seededFlags.rows[0].n === 7);
+      check("empty-db: flags seed present (8 incl. ai_gateway + knowledge_v2 + connectors + research + content)", seededFlags.rows[0].n === 8);
       await pool.end();
 
       const lines2: string[] = [];

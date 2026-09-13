@@ -33,6 +33,15 @@
  *       display_name) + connector_deliveries (signed-webhook receipt log
  *       + replay cache, UNIQUE (website_id, delivery_id)) ·
  *   028 connectors flag + connectors.manage permission
+ * Phase 8 (§11 P7 — content workforce, §60-§61 lifecycle, §5.1 state map,
+ * §72 approval immutability, audit §901):
+ *   032 content_items + content_versions (never-overwrite) + approval_actions
+ *       + drafts→content lineage backfill (§5.1 state map) + approvals v2
+ *       columns (content_item_id WITHOUT cascade, risk_level, requested_action,
+ *       decision_reason, task_id) ·
+ *   033 content workforce agents activation + versioned v1 prompts
+ *       (content_strategy / content / fact_check) ·
+ *   034 content flag + content.manage permission
  *
  * 000 records the pre-existing AgentOS baseline (the 11 legacy tables) so the
  * ledger is complete even on a database provisioned from empty. On the live
@@ -1137,6 +1146,207 @@ const M_031_RESEARCH_SCHEDULE_SOURCES = `
 ALTER TABLE research_schedules
   ADD COLUMN IF NOT EXISTS sources JSONB NOT NULL DEFAULT '[]'::jsonb;`;
 
+/**
+ * Phase 8 — content workforce storage (§60-§61, §5.1, §72; audit §901).
+ *
+ * content_items carries the §60 nine-state lifecycle; content_versions are
+ * IMMUTABLE copies (never-overwrite, §61) — every edit appends a new version
+ * row and moves content_items.current_version_id inside one transaction.
+ *
+ * Drafts lineage (§5.1, non-destructive restructure): each legacy draft whose
+ * tenant has a business_units mapping is copied to one content_item + version
+ * 1 with the documented state map (pending→DRAFT, approved→APPROVED,
+ * scheduled→SCHEDULED, posted→PUBLISHED, failed→PUBLISHED with the failure
+ * traceable in content_publications + brief.legacy_status, rejected→REVIEW).
+ * Unmapped tenants stay OUT (never silently global — same rule as the
+ * knowledge backfill). `drafts` itself is untouched: the legacy marketing →
+ * FSM → publishing sweep keeps running unchanged until a later cutover phase.
+ *
+ * approvals v2 (§72): new decision rows may reference content_items — the FK
+ * deliberately has NO ON DELETE CASCADE so approval audit rows survive the
+ * (future) removal of a content item. approval_actions is the edit-before-
+ * approve trail (§5.1 bundle 7). Legacy rows/columns are untouched.
+ */
+const M_032_CONTENT_WORKFORCE = `
+CREATE TABLE IF NOT EXISTS content_items (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  business_unit_id BIGINT NOT NULL REFERENCES business_units(id) ON DELETE CASCADE,
+  website_id BIGINT REFERENCES websites(id) ON DELETE SET NULL,
+  research_item_id BIGINT REFERENCES research_items(id) ON DELETE SET NULL,
+  type TEXT NOT NULL DEFAULT 'article'
+    CHECK (type IN ('article','social_post','email','page_copy','other')),
+  title TEXT,
+  lifecycle TEXT NOT NULL DEFAULT 'IDEA'
+    CHECK (lifecycle IN ('IDEA','RESEARCHING','DRAFT','FACT_CHECK','REVIEW','APPROVED','SCHEDULED','PUBLISHED','ARCHIVED')),
+  brief JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_by_agent TEXT,
+  current_version_id BIGINT,
+  unprocessed_reason TEXT,
+  task_id BIGINT REFERENCES tasks(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  reviewed_at TIMESTAMPTZ,
+  reviewed_by TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_content_items_bu_lifecycle
+  ON content_items (business_unit_id, lifecycle, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_content_items_research
+  ON content_items (research_item_id) WHERE research_item_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS content_versions (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  content_item_id BIGINT NOT NULL REFERENCES content_items(id) ON DELETE CASCADE,
+  version INT NOT NULL,
+  title TEXT,
+  body TEXT NOT NULL,
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_by_agent TEXT,
+  prompt_version INT,
+  prompt_hash TEXT,
+  change_note TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (content_item_id, version)
+);
+
+ALTER TABLE content_items
+  ADD CONSTRAINT fk_content_items_current_version
+  FOREIGN KEY (current_version_id) REFERENCES content_versions(id) ON DELETE SET NULL;
+
+-- approvals v2 columns (§72): content_item_id has NO cascade on purpose.
+-- draft_id drops NOT NULL (a pure relaxation — legacy rows untouched): v2
+-- decision rows reference content_items instead of drafts.
+ALTER TABLE approvals ALTER COLUMN draft_id DROP NOT NULL;
+ALTER TABLE approvals ADD COLUMN IF NOT EXISTS content_item_id BIGINT REFERENCES content_items(id);
+ALTER TABLE approvals ADD COLUMN IF NOT EXISTS risk_level TEXT CHECK (risk_level IN ('low','medium','high'));
+ALTER TABLE approvals ADD COLUMN IF NOT EXISTS requested_action TEXT;
+ALTER TABLE approvals ADD COLUMN IF NOT EXISTS decision_reason TEXT;
+ALTER TABLE approvals ADD COLUMN IF NOT EXISTS task_id BIGINT REFERENCES tasks(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS idx_approvals_content_item ON approvals (content_item_id);
+
+CREATE TABLE IF NOT EXISTS approval_actions (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  business_unit_id BIGINT NOT NULL REFERENCES business_units(id) ON DELETE CASCADE,
+  content_item_id BIGINT REFERENCES content_items(id) ON DELETE SET NULL,
+  approval_id BIGINT REFERENCES approvals(id) ON DELETE SET NULL,
+  version_id BIGINT REFERENCES content_versions(id) ON DELETE SET NULL,
+  actor_user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+  actor_label TEXT,
+  action TEXT NOT NULL CHECK (action IN ('submit','approve','reject','request_changes','edit','assign','escalate')),
+  diff JSONB,
+  note TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_approval_actions_item
+  ON approval_actions (content_item_id, created_at DESC);
+
+-- Drafts → content lineage backfill (§5.1 state map). Idempotent: the brief
+-- records legacy_draft_id and the WHERE re-guard makes re-runs no-ops.
+INSERT INTO content_items (business_unit_id, type, title, lifecycle, brief, created_by_agent, created_at, updated_at)
+SELECT b.id,
+       'social_post',
+       left(d.content, 80),
+       CASE d.status
+         WHEN 'pending'   THEN 'DRAFT'
+         WHEN 'approved'  THEN 'APPROVED'
+         WHEN 'scheduled' THEN 'SCHEDULED'
+         WHEN 'posted'    THEN 'PUBLISHED'
+         WHEN 'failed'    THEN 'PUBLISHED'
+         WHEN 'rejected'  THEN 'REVIEW'
+       END,
+       jsonb_build_object(
+         'source', 'drafts',
+         'legacy_draft_id', d.id,
+         'legacy_status', d.status,
+         'channel', d.channel,
+         'review_notes', d.review_notes
+       ),
+       d.agent,
+       d.created_at,
+       d.created_at
+FROM drafts d
+JOIN business_units b ON b.legacy_tenant_id = d.tenant_id
+WHERE NOT EXISTS (
+  SELECT 1 FROM content_items ci
+  WHERE ci.brief->>'source' = 'drafts'
+    AND (ci.brief->>'legacy_draft_id')::bigint = d.id
+);
+
+INSERT INTO content_versions (content_item_id, version, title, body, metadata, created_by_agent, change_note)
+SELECT ci.id, 1, ci.title, d.content,
+       jsonb_build_object('source', 'drafts', 'legacy_status', d.status),
+       d.agent,
+       'Phase 8: legacy drafts lineage (version 1)'
+FROM drafts d
+JOIN business_units b ON b.legacy_tenant_id = d.tenant_id
+JOIN content_items ci ON ci.brief->>'source' = 'drafts'
+                     AND (ci.brief->>'legacy_draft_id')::bigint = d.id
+WHERE NOT EXISTS (
+  SELECT 1 FROM content_versions v WHERE v.content_item_id = ci.id AND v.version = 1
+);
+
+UPDATE content_items ci
+SET current_version_id = v.id
+FROM content_versions v
+WHERE v.content_item_id = ci.id AND v.version = 1
+  AND ci.current_version_id IS NULL
+  AND ci.brief->>'source' = 'drafts';`;
+
+/**
+ * Phase 8 — content workforce agents (§262): content_strategy / content /
+ * fact_check were seeded disabled at P2; their phase flips them on and gives
+ * each a versioned v1 prompt (agents are data, §6.4 — prompts live in
+ * agent_versions, never inline).
+ */
+const M_033_CONTENT_AGENTS = `
+UPDATE agents SET status = 'active', updated_at = now()
+WHERE slug IN ('content_strategy','content','fact_check') AND status = 'disabled';
+
+INSERT INTO agent_versions (agent_id, version, system_prompt, config, changelog)
+SELECT a.id, COALESCE(max(v.version), 0) + 1,
+       'You are the Content Strategy Agent. Given research material (findings with cited sources) and a brief, produce an editorial plan: the angle, target audience, channel fit, tone, key messages (each mapped to the [n] source citations that support it), and an outline of sections. Cite sources by [n] index. If the material cannot support a defensible plan, set ambiguous=true instead of inventing direction. Never fabricate facts not present in the sources.',
+       '{"outputSchema":"content_plan_v1"}'::jsonb,
+       'Phase 8 (P7): content workforce v1 strategy prompt'
+FROM agents a LEFT JOIN agent_versions v ON v.agent_id = a.id
+WHERE a.slug = 'content_strategy' GROUP BY a.id;
+
+INSERT INTO agent_versions (agent_id, version, system_prompt, config, changelog)
+SELECT a.id, COALESCE(max(v.version), 0) + 1,
+       'You are the Content Agent. Given an editorial plan and SOURCE excerpts, write the piece: a headline and the full body in markdown. Use ONLY facts present in the source excerpts or the plan; mark claims inline as [n] matching the source list. Match the requested tone, audience and channel conventions. Never fabricate statistics, quotes or facts; if a claim is not backed by the sources, leave it out.',
+       '{"outputSchema":"content_draft_v1"}'::jsonb,
+       'Phase 8 (P7): content workforce v1 drafting prompt'
+FROM agents a LEFT JOIN agent_versions v ON v.agent_id = a.id
+WHERE a.slug = 'content' GROUP BY a.id;
+
+INSERT INTO agent_versions (agent_id, version, system_prompt, config, changelog)
+SELECT a.id, COALESCE(max(v.version), 0) + 1,
+       'You are the Fact Check Agent. Given a draft and the SOURCE excerpts it cites, verify every factual claim against the sources. Return a verdict per claim (supported | unsupported | contradicted | unverifiable) with the supporting citation indexes, a corrected wording where a small fix is possible, and an overall status: pass (all claims supported), warnings (unsupported or unverifiable claims remain), or fail (contradicted or fabricated content). Flag rather than fix: never silently rewrite the meaning of the draft.',
+       '{"outputSchema":"fact_check_report_v1"}'::jsonb,
+       'Phase 8 (P7): content workforce v1 fact-check prompt'
+FROM agents a LEFT JOIN agent_versions v ON v.agent_id = a.id
+WHERE a.slug = 'fact_check' GROUP BY a.id;`;
+
+/**
+ * Phase 8 flag + permission (same pattern as 022/026/028/030): the `content`
+ * flag is the platform-level kill switch for the content workforce (routes
+ * fail closed 409/404 and the handler skips when OFF); the `content.manage`
+ * permission gates the /content surface for owner and administrator roles.
+ */
+const M_034_CONTENT_FLAG_PERMS = `
+INSERT INTO feature_flags (key, enabled, emergency, description)
+VALUES ('content', TRUE, FALSE,
+        'Content workforce: strategy→content→fact_check chain, versioned content items, approval center v2 (OFF = no content chain execution)')
+ON CONFLICT (key) DO NOTHING;
+
+INSERT INTO permissions (key) VALUES ('content.manage') ON CONFLICT (key) DO NOTHING;
+
+INSERT INTO role_permissions (role_id, permission_id)
+SELECT r.id, p.id FROM roles r
+JOIN permissions p ON p.key = 'content.manage'
+WHERE r.key IN ('owner','administrator')
+ON CONFLICT DO NOTHING;`;
+
 export const MIGRATIONS: MigrationDef[] = [
   { version: "000", name: "agentos_legacy_baseline", source: M_000_LEGACY_BASELINE },
   { version: "001", name: "schema_migrations", source: M_001_SCHEMA_MIGRATIONS },
@@ -1170,4 +1380,7 @@ export const MIGRATIONS: MigrationDef[] = [
   { version: "029", name: "research_workforce", source: M_029_RESEARCH_WORKFORCE },
   { version: "030", name: "research_flag_permissions", source: M_030_RESEARCH_FLAG_PERMS },
   { version: "031", name: "research_schedule_sources", source: M_031_RESEARCH_SCHEDULE_SOURCES },
+  { version: "032", name: "content_workforce", source: M_032_CONTENT_WORKFORCE },
+  { version: "033", name: "content_workforce_agents", source: M_033_CONTENT_AGENTS },
+  { version: "034", name: "content_flag_permissions", source: M_034_CONTENT_FLAG_PERMS },
 ];

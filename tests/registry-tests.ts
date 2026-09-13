@@ -45,14 +45,18 @@ try {
   check("ambassador is NOT a registry row (fold decision)",
     !agents.some((a) => a.slug === "ambassador"));
   const placeholders = ["supervisor", "intelligence", "legal_intelligence", "competitor", "content_strategy", "content", "fact_check", "seo", "social_media", "lead", "customer_inquiry", "customer_support", "analytics", "strategy", "reporting"];
-  // Phase 7 (migration 029) activates the research workforce trio; the
-  // remaining twelve placeholders stay disabled until their phases arrive.
+  // Phase 7 (migration 029) activates the research workforce trio; Phase 8
+  // (migration 033) activates the content workforce trio; the remaining
+  // nine placeholders stay disabled until their phases arrive.
   const activated7 = ["intelligence", "legal_intelligence", "competitor"];
   check("Phase 7 workforce trio activated (migration 029)",
     activated7.every((s) => agents.find((a) => a.slug === s)?.status === "active"));
-  check("remaining 12 future-workforce placeholders still disabled",
-    placeholders.filter((s) => !activated7.includes(s)).every((s) => agents.find((a) => a.slug === s)?.status === "disabled"));
-  check("registry has 19 rows (4 active + 3 Phase 7 + 12 placeholders)", agents.length === 19, `n=${agents.length}`);
+  const activated8 = ["content_strategy", "content", "fact_check"];
+  check("Phase 8 workforce trio activated (migration 033)",
+    activated8.every((s) => agents.find((a) => a.slug === s)?.status === "active"));
+  check("remaining 9 future-workforce placeholders still disabled",
+    placeholders.filter((s) => !activated7.includes(s) && !activated8.includes(s)).every((s) => agents.find((a) => a.slug === s)?.status === "disabled"));
+  check("registry has 19 rows (4 active + 3 Phase 7 + 3 Phase 8 + 9 placeholders)", agents.length === 19, `n=${agents.length}`);
 
   // golden prompts: version 1 of each survivor matches the legacy role line
   const golden: Record<string, string> = {
