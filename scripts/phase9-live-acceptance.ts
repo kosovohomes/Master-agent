@@ -185,7 +185,7 @@ async function p9Main() {
   }
 
   // ---------- 9. regression: widget + legacy ----------
-  const widget = await fetch(`${P9_BASE}/api/v1/widget/config?site=acme-homes`);
+  const widget = await fetch(`${P9_BASE}/api/v1/widget/config?tenant=acme-homes`);
   ok9("widget regression: config 200", widget.status === 200, `status=${widget.status}`);
 
   console.log(`\nP9 SUMMARY: ${p9Failures === 0 ? "ALL PASS" : p9Failures + " FAILURES"} (degradedMode=${degraded})`);
