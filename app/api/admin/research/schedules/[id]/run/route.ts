@@ -50,6 +50,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
       agentSlug: schedule.agentSlug,
       topic: schedule.topic,
       queries: schedule.queries,
+      sources: schedule.sources,
       maxItems: schedule.maxItems,
     },
     priority: 10, // manual runs outrank cron work

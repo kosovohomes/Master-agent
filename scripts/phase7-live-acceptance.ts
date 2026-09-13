@@ -82,10 +82,12 @@ async function main() {
     body: JSON.stringify({
       businessUnitId: bu.id, agentSlug: "research", name: `AI intelligence daily (acceptance ${stamp})`,
       topic: "latest AI industry news {{date}}", cadence: "daily",
+      sources: ["https://techcrunch.com/feed/", "https://www.theverge.com/rss/index.xml"],
     }),
   });
-  check("schedule created", s1.status === 201 || s1.status === 200, JSON.stringify(s1.body));
+  check("schedule created (with monitored sources)", s1.status === 201 || s1.status === 200, JSON.stringify(s1.body));
   created.scheduleId = s1.body?.data?.schedule?.id ?? 0;
+  check("schedule persisted 2 monitored sources", (s1.body?.data?.schedule?.sources ?? []).length === 2, JSON.stringify(s1.body?.data?.schedule?.sources));
 
   const badS = await jfetch(auth, "/api/admin/research", {
     method: "POST", headers: { "Content-Type": "application/json" },
@@ -98,16 +100,22 @@ async function main() {
   const taskId = run1.body?.data?.taskId as number;
   created.taskIds.push(taskId);
 
-  // poll the durable task (search + fetch + analyze can take ~30-60s)
+  // poll the durable task — serverless has no resident worker, so the
+  // acceptance script plays the worker: hit the engine tick endpoint
+  // (same x-cron-secret gate the external scheduler uses) between polls.
+  const cronSecret = process.env.CRON_SECRET as string;
   let task: any = null;
-  for (let i = 0; i < 30; i++) {
+  for (let i = 0; i < 36; i++) {
+    await fetch(`${BASE}/api/agents/engine/tick`, {
+      method: "POST", headers: { "x-cron-secret": cronSecret },
+    }).catch(() => null);
     await new Promise((r) => setTimeout(r, 5000));
     const tr = await jfetch(auth, `/api/admin/tasks?limit=200`);
     const rows = (tr.body?.data?.tasks ?? []) as any[];
     task = rows.find((t) => t.id === taskId) ?? null;
     if (task && ["succeeded", "failed", "escalated"].includes(task.status)) break;
   }
-  check("research_run task succeeded", task?.status === "succeeded", JSON.stringify(task?.status));
+  check("research_run task succeeded", task?.status === "succeeded", JSON.stringify({ status: task?.status, error: task?.error, result: task?.result }));
   check("task result reports degraded mode (LLM unfunded)",
     task?.result?.degraded === true && typeof task?.result?.degradeReason === "string",
     JSON.stringify(task?.result));
@@ -158,7 +166,7 @@ async function main() {
 
   // ---------- audit hygiene ----------
   const ar = await jfetch(auth, "/api/admin/audit?limit=100");
-  const audits = (ar.body?.data?.entries ?? ar.body?.data ?? []) as any[];
+  const audits = (ar.body?.data ?? []) as any[];
   const hasCreate = audits.some((a) => a.action === "research.schedule.create" && a.result === "success");
   const hasRun = audits.some((a) => a.action === "research.schedule.run");
   check("audit records schedule.create + run", hasCreate && hasRun, JSON.stringify(audits.slice(0, 3).map((a) => a.action)));

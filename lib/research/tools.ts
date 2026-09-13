@@ -145,6 +145,9 @@ export function makeBraveSearch(fetchImpl: FetchImpl, apiKey: string): SearchPro
 export interface ResearchTools {
   search(query: string, limit?: number): Promise<WebSearchResult[]>;
   fetchUrl(url: string): Promise<FetchedDoc>;
+  /** Monitored-source legs (Phase 5 machinery, SSRF-guarded). */
+  fetchRss(feedUrl: string, maxItems?: number): Promise<FetchedDoc[]>;
+  fetchSitemap(sitemapUrl: string, maxUrls?: number): Promise<FetchedDoc[]>;
   /** Observability: which search provider served this run. */
   searchProviderId: string;
 }
@@ -211,6 +214,16 @@ export function makeResearchTools(deps: {
       const safe = guardUrl(url);
       if (!safe) throw new Error(`blocked url (ssrf guard): ${url.slice(0, 120)}`);
       return fetcher.fetchUrlText(safe);
+    },
+    async fetchRss(feedUrl, maxItems) {
+      const safe = guardUrl(feedUrl);
+      if (!safe) throw new Error(`blocked url (ssrf guard): ${feedUrl.slice(0, 120)}`);
+      return fetcher.fetchRss(safe, maxItems);
+    },
+    async fetchSitemap(sitemapUrl, maxUrls) {
+      const safe = guardUrl(sitemapUrl);
+      if (!safe) throw new Error(`blocked url (ssrf guard): ${sitemapUrl.slice(0, 120)}`);
+      return fetcher.fetchSitemap(safe, maxUrls);
     },
   };
 }

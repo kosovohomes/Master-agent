@@ -30,6 +30,7 @@ import type {
   ResearchItemStatus,
   ResearchSchedule,
   ResearchSource,
+  ResearchSourceRef,
 } from "./types";
 
 export class ResearchServiceError extends Error {
@@ -47,17 +48,51 @@ export class ResearchServiceError extends Error {
 
 interface ScheduleRow {
   id: string | number; business_unit_id: number; agent_slug: string; name: string;
-  topic: string; queries: string[] | null; cadence: string; max_items: number;
-  enabled: boolean; last_run_at: string | null; created_at: string; updated_at: string;
+  topic: string; queries: string[] | null; sources: ResearchSourceRef[] | null; cadence: string;
+  max_items: number; enabled: boolean; last_run_at: string | null; created_at: string; updated_at: string;
 }
 
 function toSchedule(r: ScheduleRow): ResearchSchedule {
   return {
     id: Number(r.id), businessUnitId: r.business_unit_id, agentSlug: r.agent_slug as ResearchSchedule["agentSlug"],
-    name: r.name, topic: r.topic, queries: r.queries ?? [], cadence: r.cadence as ResearchCadence,
+    name: r.name, topic: r.topic, queries: r.queries ?? [], sources: r.sources ?? [],
+    cadence: r.cadence as ResearchCadence,
     maxItems: r.max_items, enabled: r.enabled, lastRunAt: r.last_run_at,
     createdAt: r.created_at, updatedAt: r.updated_at,
   };
+}
+
+const SOURCE_KINDS = ["url", "rss", "sitemap"] as const;
+
+/**
+ * Normalize operator input into ResearchSourceRefs. Accepts either
+ * {kind, ref} objects or bare URL strings (kind inferred: sitemap URLs,
+ * feed-looking URLs → rss, else page). Max 6; http(s) only; ≤ 500 chars.
+ */
+export function normalizeSources(raw: unknown): ResearchSourceRef[] {
+  const arr = Array.isArray(raw) ? raw : [];
+  const out: ResearchSourceRef[] = [];
+  for (const entry of arr.slice(0, 6)) {
+    let kind: string | null = null;
+    let ref = "";
+    if (typeof entry === "string") {
+      ref = entry.trim();
+    } else if (entry && typeof entry === "object") {
+      const e = entry as { kind?: unknown; ref?: unknown };
+      ref = String(e.ref ?? "").trim();
+      kind = e.kind != null ? String(e.kind) : null;
+    }
+    if (ref === "") continue;
+    if (!/^https?:\/\//i.test(ref) || ref.length > 500) continue;
+    if (kind == null) {
+      kind = /sitemap[^/]*\.xml$/i.test(ref) || /sitemap\//i.test(ref) ? "sitemap"
+        : /rss|feed|\.xml($|\?)|\/feed(\/|$)/i.test(ref) ? "rss"
+        : "url";
+    }
+    if (!(SOURCE_KINDS as readonly string[]).includes(kind)) continue;
+    out.push({ kind: kind as ResearchSourceRef["kind"], ref });
+  }
+  return out;
 }
 
 export async function listSchedules(businessUnitId?: number | null): Promise<ResearchSchedule[]> {
@@ -73,15 +108,17 @@ export async function createSchedule(p: {
   name: string;
   topic: string;
   queries?: string[];
+  sources?: ResearchSourceRef[];
   cadence?: ResearchCadence;
   maxItems?: number;
 }): Promise<ResearchSchedule> {
   if (p.topic.trim() === "") throw new ResearchServiceError("INVALID_TOPIC", "topic must not be empty");
   const rows = await query<ScheduleRow>(
-    `INSERT INTO research_schedules (business_unit_id, agent_slug, name, topic, queries, cadence, max_items)
-     VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7) RETURNING *`,
+    `INSERT INTO research_schedules (business_unit_id, agent_slug, name, topic, queries, sources, cadence, max_items)
+     VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7, $8) RETURNING *`,
     [p.businessUnitId, p.agentSlug, p.name.trim(), p.topic.trim(),
      JSON.stringify((p.queries ?? []).filter((q) => q.trim() !== "").slice(0, 4)),
+     JSON.stringify((p.sources ?? []).slice(0, 6)),
      p.cadence ?? "daily", Math.min(Math.max(p.maxItems ?? 5, 1), 20)]
   ).catch((e: { code?: string }) => {
     if (e.code === "23505") throw new ResearchServiceError("DUPLICATE", "a schedule with this name exists for the BU");
@@ -92,7 +129,7 @@ export async function createSchedule(p: {
 }
 
 export async function updateSchedule(id: number, patch: {
-  enabled?: boolean; cadence?: ResearchCadence; topic?: string; queries?: string[]; maxItems?: number;
+  enabled?: boolean; cadence?: ResearchCadence; topic?: string; queries?: string[]; sources?: ResearchSourceRef[]; maxItems?: number;
 }): Promise<ResearchSchedule | null> {
   const rows = await query<ScheduleRow>(
     `UPDATE research_schedules SET
@@ -100,11 +137,13 @@ export async function updateSchedule(id: number, patch: {
        cadence = COALESCE($3, cadence),
        topic = COALESCE($4, topic),
        queries = COALESCE($5::jsonb, queries),
-       max_items = COALESCE($6, max_items),
+       sources = COALESCE($6::jsonb, sources),
+       max_items = COALESCE($7, max_items),
        updated_at = now()
      WHERE id = $1 RETURNING *`,
     [id, patch.enabled ?? null, patch.cadence ?? null, patch.topic ?? null,
      patch.queries ? JSON.stringify(patch.queries.slice(0, 4)) : null,
+     patch.sources ? JSON.stringify(patch.sources.slice(0, 6)) : null,
      patch.maxItems != null ? Math.min(Math.max(patch.maxItems, 1), 20) : null]
   );
   return rows[0] ? toSchedule(rows[0]) : null;
@@ -138,7 +177,7 @@ export async function spawnDueResearchRuns(periodKey = periodKeyFor(new Date()))
     const { created, taskId } = await spawnTask({
       businessUnitId: s.businessUnitId,
       kind: "research_run",
-      payload: { scheduleId: s.id, agentSlug: s.agentSlug, topic: s.topic, queries: s.queries, maxItems: s.maxItems },
+      payload: { scheduleId: s.id, agentSlug: s.agentSlug, topic: s.topic, queries: s.queries, sources: s.sources, maxItems: s.maxItems },
       priority: 40,
       maxAttempts: 3,
       idempotencyKey: `research_run:${s.id}:${periodKey}`,

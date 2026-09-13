@@ -1125,6 +1125,18 @@ JOIN permissions p ON p.key = 'research.manage'
 WHERE r.key IN ('owner','administrator')
 ON CONFLICT DO NOTHING;`;
 
+/**
+ * Phase 7 (live-acceptance learning): public search engines block Vercel
+ * datacenter egress, so `web_search` cannot be the production backbone of
+ * scheduled research. Schedules therefore carry MONITORED SOURCES —
+ * RSS feeds, sitemaps and pages fetched with the Phase 5 machinery — as
+ * the deterministic acquisition layer; web_search stays as the optional
+ * amplification leg (Brave key via env, no deploy). Purely additive.
+ */
+const M_031_RESEARCH_SCHEDULE_SOURCES = `
+ALTER TABLE research_schedules
+  ADD COLUMN IF NOT EXISTS sources JSONB NOT NULL DEFAULT '[]'::jsonb;`;
+
 export const MIGRATIONS: MigrationDef[] = [
   { version: "000", name: "agentos_legacy_baseline", source: M_000_LEGACY_BASELINE },
   { version: "001", name: "schema_migrations", source: M_001_SCHEMA_MIGRATIONS },
@@ -1157,4 +1169,5 @@ export const MIGRATIONS: MigrationDef[] = [
   { version: "028", name: "connectors_flag_permissions", source: M_028_CONNECTORS_FLAG_PERMS },
   { version: "029", name: "research_workforce", source: M_029_RESEARCH_WORKFORCE },
   { version: "030", name: "research_flag_permissions", source: M_030_RESEARCH_FLAG_PERMS },
+  { version: "031", name: "research_schedule_sources", source: M_031_RESEARCH_SCHEDULE_SOURCES },
 ];

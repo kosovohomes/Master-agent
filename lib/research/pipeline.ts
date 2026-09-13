@@ -64,6 +64,8 @@ export interface PipelineInput {
   agentSlug: string;
   topic: string;
   queries?: string[];
+  /** Monitored sources fetched BEFORE any search (deterministic leg). */
+  sources?: Array<{ kind: "url" | "rss" | "sitemap"; ref: string }>;
   scheduleId?: number | null;
   taskId?: number | null;
   maxItems?: number;
@@ -203,9 +205,39 @@ export async function runResearch(input: PipelineInput, deps: PipelineDeps): Pro
   const queries = planQueries(input, runDate);
   result.queries = queries;
 
+  // seeded monitored sources (deterministic leg — works without any search
+  // API; search engines are the optional amplification below)
+  const candidates: FetchedCandidate[] = [];
+  let fetches = 0;
+  const fetchBudget = 6;
+  for (const src of (input.sources ?? []).slice(0, 6)) {
+    if (fetches >= fetchBudget) break;
+    try {
+      if (src.kind === "url") {
+        const d = await tools.fetchUrl(src.ref);
+        candidates.push({ search: { title: d.title, url: src.ref, snippet: d.text.slice(0, SNIPPET_CHARS) }, doc: { title: d.title, text: d.text, provenance: d.provenance } });
+        result.fetched++;
+      } else {
+        const docs = src.kind === "rss"
+          ? await tools.fetchRss(src.ref, 5)
+          : await tools.fetchSitemap(src.ref, 5);
+        for (const d of docs.slice(0, 5)) {
+          const url = d.url ?? src.ref;
+          if (candidates.some((c) => c.search.url === url)) continue;
+          candidates.push({ search: { title: d.title, url, snippet: d.text.slice(0, SNIPPET_CHARS) }, doc: { title: d.title, text: d.text, provenance: d.provenance } });
+        }
+        result.fetched++;
+      }
+    } catch {
+      // containment: a dead monitored source is skipped, not fatal (§144)
+    } finally {
+      fetches++;
+    }
+  }
+
   // search (contained per query)
   const perQuery: Array<{ query: string; hits: WebSearchResult[] }> = [];
-  const seenUrls = new Set<string>();
+  const seenUrls = new Set<string>(candidates.map((c) => (c.search.url || "").replace(/[#?].*$/, "").toLowerCase()));
   for (const q of queries) {
     const hits = await tools.search(q);
     result.searched++;
@@ -218,13 +250,12 @@ export async function runResearch(input: PipelineInput, deps: PipelineDeps): Pro
     if (fresh.length > 0) perQuery.push({ query: q, hits: fresh });
   }
 
-  // fetch (bounded)
-  const fetchBudget = 6;
-  const candidates: FetchedCandidate[] = [];
-  let fetches = 0;
+  // fetch (bounded) — the remaining budget goes to search hits
+  const candidates2: FetchedCandidate[] = [];
+  let searchFetches = 0;
   outer: for (const { query, hits } of perQuery) {
     for (const hit of hits) {
-      if (fetches >= fetchBudget) break outer;
+      if (fetches + searchFetches >= fetchBudget) break outer;
       let doc: FetchedCandidate["doc"] = null;
       let error: string | undefined;
       try {
@@ -234,10 +265,11 @@ export async function runResearch(input: PipelineInput, deps: PipelineDeps): Pro
       } catch (e) {
         error = e instanceof Error ? e.message : String(e); // one bad URL is contained
       }
-      fetches++;
-      candidates.push({ search: hit, doc, error });
+      searchFetches++;
+      candidates2.push({ search: hit, doc, error });
     }
   }
+  candidates.push(...candidates2);
 
   // Always include snippet-only candidates beyond the fetch budget so the
   // analysis still sees breadth (sources capped at 12).

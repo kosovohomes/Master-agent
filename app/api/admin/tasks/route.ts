@@ -38,6 +38,7 @@ export async function GET(req: Request) {
     error: t.error, errorClass: t.error_class, runId: t.run_id,
     workflowRunId: t.workflow_run_id, idempotencyKey: t.idempotency_key,
     cancelRequested: t.cancel_requested,
+    result: t.result,
     createdAt: t.created_at, startedAt: t.started_at, finishedAt: t.finished_at,
   }));
   return NextResponse.json({ data: { tasks, handlerKinds: knownTaskKinds() }, meta: { requestId } });

@@ -46,6 +46,7 @@ type Schedule = {
   name: string;
   topic: string;
   queries: string[];
+  sources: { kind: string; ref: string }[];
   cadence: string;
   maxItems: number;
   enabled: boolean;
@@ -102,6 +103,7 @@ export default function ResearchPage() {
   const [name, setName] = useState("");
   const [topic, setTopic] = useState("");
   const [cadence, setCadence] = useState("daily");
+  const [sources, setSources] = useState("");
   // competitor form
   const [compName, setCompName] = useState("");
   const [compUrl, setCompUrl] = useState("");
@@ -135,12 +137,15 @@ export default function ResearchPage() {
       const res = await fetch("/api/admin/research", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ businessUnitId: Number(buId), agentSlug, name, topic, cadence }),
+        body: JSON.stringify({
+          businessUnitId: Number(buId), agentSlug, name, topic, cadence,
+          sources: sources.split("\n").map((s) => s.trim()).filter(Boolean),
+        }),
       });
       const j = (await res.json()) as { data?: { schedule: Schedule }; errors?: { detail?: string }[] };
       if (!res.ok || !j.data) { setError(j.errors?.[0]?.detail ?? `Create failed (${res.status})`); return; }
-      setNotice(`Schedule #${j.data.schedule.id} created (${j.data.schedule.agentSlug}, ${j.data.schedule.cadence}).`);
-      setName(""); setTopic("");
+      setNotice(`Schedule #${j.data.schedule.id} created (${j.data.schedule.agentSlug}, ${j.data.schedule.cadence}, ${j.data.schedule.sources.length} source(s)).`);
+      setName(""); setTopic(""); setSources("");
       await load();
     } finally { setBusy(""); }
   }
@@ -269,6 +274,9 @@ export default function ResearchPage() {
                   <td>
                     <div>{s.name}</div>
                     <div className="text-xs" style={{ color: "var(--muted)" }}>{s.topic}</div>
+                    {s.sources.length > 0 && (
+                      <div className="text-xs" style={{ color: "var(--muted)" }}>monitors {s.sources.length} source(s)</div>
+                    )}
                   </td>
                   <td><span className="cc-badge cc-badge-muted">{s.agentSlug}</span></td>
                   <td>{s.cadence}<span className="text-xs" style={{ color: "var(--muted)" }}> · {s.maxItems}/run</span></td>
@@ -306,6 +314,13 @@ export default function ResearchPage() {
             <option value="weekly">weekly</option>
             <option value="hourly">hourly</option>
           </select>
+          <textarea
+            className={input}
+            placeholder={"Monitored sources — one URL per line\nRSS feed, sitemap.xml, or page\n(max 6)"}
+            value={sources}
+            onChange={(e) => setSources(e.target.value)}
+            style={{ gridColumn: "1 / -1", minHeight: 64 }}
+          />
           <button className="cc-btn cc-btn-primary" disabled={busy !== "" || !buId || !name || !topic} onClick={createSchedule}>
             {busy === "create" ? "…" : "Create schedule"}
           </button>

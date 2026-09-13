@@ -45,6 +45,7 @@ export interface ResearchRunPayload {
   agentSlug?: string;
   topic?: string;
   queries?: string[];
+  sources?: Array<{ kind: "url" | "rss" | "sitemap"; ref: string }>;
   maxItems?: number;
   /** Reprocess mode: re-analyze a stored 'unprocessed' item. */
   researchItemId?: number;
@@ -82,13 +83,14 @@ export function makeResearchRunHandler(deps: {
     let topic = "";
     let scheduleId: number | null = null;
     let queries: string[] = [];
+    let sources: Array<{ kind: "url" | "rss" | "sitemap"; ref: string }> = [];
     let competitorNames: string[] = [];
     let skipReason: string | null = null;
 
     await step("prepare", async () => {
       if (payload.scheduleId != null) {
-        const rows = await query<{ id: number; agent_slug: string; topic: string; queries: string[] | null; enabled: boolean }>(
-          "SELECT id, agent_slug, topic, queries, enabled FROM research_schedules WHERE id = $1",
+        const rows = await query<{ id: number; agent_slug: string; topic: string; queries: string[] | null; sources: Array<{ kind: "url" | "rss" | "sitemap"; ref: string }> | null; enabled: boolean }>(
+          "SELECT id, agent_slug, topic, queries, sources, enabled FROM research_schedules WHERE id = $1",
           [Number(payload.scheduleId)]
         );
         if (rows.length === 0) throw new Error(`schedule not found: ${payload.scheduleId}`);
@@ -99,6 +101,7 @@ export function makeResearchRunHandler(deps: {
         scheduleId = rows[0].id;
         topic = rows[0].topic;
         queries = rows[0].queries ?? [];
+        sources = rows[0].sources ?? [];
         // Spawn payload wins when it names a workforce agent explicitly;
         // otherwise the schedule's agent executes.
         if (!payload.agentSlug) agentSlug = rows[0].agent_slug;
@@ -106,10 +109,11 @@ export function makeResearchRunHandler(deps: {
         topic = String(payload.topic ?? "");
         if (topic.trim() === "") throw new Error("research_run: missing topic");
         queries = payload.queries ?? [];
+        sources = payload.sources ?? [];
       }
       const comps = await listCompetitors(task.business_unit_id);
       competitorNames = comps.filter((c) => c.enabled).map((c) => c.name);
-      return { agentSlug, scheduleId, competitorNames };
+      return { agentSlug, scheduleId, sources: sources.length, competitorNames };
     });
 
     if (skipReason !== null) return { skipped: true, reason: skipReason };
@@ -124,6 +128,7 @@ export function makeResearchRunHandler(deps: {
           agentSlug,
           topic,
           queries,
+          sources,
           scheduleId,
           taskId: task.id,
           competitorNames,

@@ -169,6 +169,32 @@ check("escalation: threshold is inclusive at 0.35", !needsEscalation({ title: "t
   check("competitor: event draft carried on the finding", outcome.result.competitorEvents === 1 && outcome.findings[0].finding.competitorEvents?.length === 1);
 }
 
+// ---------- seeded monitored sources: the deterministic acquisition leg ----------
+// (search returns NOTHING — the production reality on serverless egress —
+// and the run still collects real material from the monitored feed)
+{
+  const emptySearch: SearchProvider = { id: "dead-engine", search: async () => [] };
+  const rssFeed = `<?xml version="1.0"?><rss version="2.0"><channel><title>Wire</title>
+    <item><title>Fresh AI headline</title><link>https://wire.example/post-1</link><description>The senate advanced the AI act with new licensing rules.</description></item>
+    <item><title>Second story</title><link>https://wire.example/post-2</link><description>Regulators open consultation on model registrations.</description></item>
+  </channel></rss>`;
+  const toolsS = makeResearchTools({
+    searchProvider: emptySearch,
+    fetchImpl: (async (url: string | URL | Request) => ({
+      ok: true, status: 200,
+      headers: { get: (n: string) => (n.toLowerCase() === "content-type" ? "application/rss+xml" : null) },
+      text: async () => rssFeed,
+    })) as unknown as FetchImpl,
+  });
+  const outcome = await runResearch(
+    { businessUnitId: 1, agentSlug: "research", topic: "AI monitoring {{date}}", sources: [{ kind: "rss", ref: "https://wire.example/feed.xml" }], runDate: RUN_DATE },
+    { llm: fakeLlm(() => okFinding()), tools: toolsS, prompt: PROMPT }
+  );
+  check("sources: rss leg collects material with zero search results", outcome.result.fetched >= 1 && outcome.result.collected >= 2 && outcome.findings.length === 1, JSON.stringify(outcome.result));
+  check("sources: feed items become citations with URLs", outcome.findings[0].sources.some((s) => (s.url ?? "").includes("wire.example/post-1")));
+  check("sources: dead search engine contained the run", outcome.result.searched >= 1 && !outcome.result.degraded);
+}
+
 // ---------- degraded: LLM provider failure → unprocessed material, not a throw ----------
 {
   const llm = fakeLlm(() => { throw new Error("429 insufficient_quota: no credits"); });

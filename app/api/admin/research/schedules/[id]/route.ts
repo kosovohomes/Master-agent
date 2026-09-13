@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { requirePermission } from "@/lib/auth/guards";
-import { updateSchedule, deleteSchedule, ResearchServiceError } from "@/lib/research/service";
+import { updateSchedule, deleteSchedule, normalizeSources, ResearchServiceError } from "@/lib/research/service";
 import type { ResearchCadence } from "@/lib/research/types";
 import { writeAudit, requestIdFor } from "@/lib/audit";
 
@@ -45,6 +45,7 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ id: string }>
       queries: Array.isArray(body.queries)
         ? body.queries.map((q) => String(q).trim()).filter((q) => q !== "").slice(0, 4)
         : undefined,
+      sources: body.sources !== undefined ? normalizeSources(body.sources) : undefined,
       maxItems: body.maxItems != null ? Number(body.maxItems) : undefined,
     });
     if (!schedule) {

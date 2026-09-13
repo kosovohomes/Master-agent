@@ -15,6 +15,7 @@ import {
   dueSchedules,
   spawnDueResearchRuns,
   periodKeyFor,
+  normalizeSources,
   recordFinding,
   recordUnprocessed,
   listItems,
@@ -67,6 +68,28 @@ const buB = await setupBu("b");
 const s1 = await createSchedule({ businessUnitId: buA, agentSlug: "research", name: "daily AI", topic: "AI news {{date}}", queries: ["extra q"], cadence: "daily" });
 check("schedule: created with defaults", s1.enabled === true && s1.maxItems === 5 && s1.cadence === "daily");
 check("schedule: queries normalized", s1.queries.length === 1);
+check("schedule: sources default empty", s1.sources.length === 0);
+
+// ---------- sources normalization (search-engine-free acquisition legs) ----------
+const norm = normalizeSources([
+  "https://www.example.com/news/rss.xml",
+  "https://www.example.com/sitemap.xml",
+  "https://www.example.com/blog",
+  { kind: "url", ref: "https://explicit.example/page" },
+  "ftp://bad.example/x",
+  "notaurl",
+  "",
+]);
+check("sources: kind inferred (rss/sitemap/url) + explicit kind + unsafe dropped",
+  norm.length === 4 && norm[0].kind === "rss" && norm[1].kind === "sitemap" && norm[2].kind === "url" && norm[3].kind === "url",
+  JSON.stringify(norm));
+const s3 = await createSchedule({
+  businessUnitId: buA, agentSlug: "research", name: "monitored AI", topic: "AI news {{date}}",
+  sources: normalizeSources(["https://techcrunch.com/feed/"]),
+});
+check("schedule: monitored sources persisted", s3.sources.length === 1 && s3.sources[0].ref === "https://techcrunch.com/feed/" && s3.sources[0].kind === "rss");
+const s3upd = await updateSchedule(s3.id, { sources: normalizeSources(["https://other.example/feed"]) });
+check("schedule: sources updatable", s3upd?.sources[0]?.ref === "https://other.example/feed");
 
 let dupErr: string | null = null;
 try {
@@ -86,14 +109,14 @@ try {
 check("schedule: unknown BU 404-coded", nfErr === "NOT_FOUND");
 
 const s2 = await createSchedule({ businessUnitId: buB, agentSlug: "legal_intelligence", name: "legal weekly", topic: "regulatory {{date}}", cadence: "weekly" });
-check("schedule: per-BU listing isolated", (await listSchedules(buA)).length === 1 && (await listSchedules(null)).length === 2);
+check("schedule: per-BU listing isolated", (await listSchedules(buA)).length === 2 && (await listSchedules(buB)).length === 1 && (await listSchedules(null)).length === 3);
 
 // due math + spawn idempotency (BOTH schedules still enabled here)
 const due0 = await dueSchedules();
 check("due: fresh schedules due", due0.some((s) => s.id === s1.id) && due0.some((s) => s.id === s2.id));
 
 const p1 = await spawnDueResearchRuns(periodKeyFor(new Date(), "daily"));
-check("spawn: both due schedules spawned", p1.spawned === 2 && p1.taskIds.length === 2, JSON.stringify(p1));
+check("spawn: all due schedules spawned (s1, s2, s3)", p1.spawned === 3 && p1.taskIds.length === 3, JSON.stringify(p1));
 const p2 = await spawnDueResearchRuns(periodKeyFor(new Date(), "daily"));
 check("spawn: same period never double-spawns", p2.spawned === 0 && p2.due === 0);
 const after = await listSchedules(null);
@@ -101,7 +124,8 @@ check("spawn: last_run_at stamped", after.every((s) => s.lastRunAt !== null));
 const runRows = await query<{ payload: Record<string, unknown>; idempotency_key: string }>(
   "SELECT payload, idempotency_key FROM tasks WHERE id = ANY($1::bigint[]) ORDER BY id", [p1.taskIds]
 );
-check("spawn: task payload carries schedule context", runRows.every((r) => typeof r.payload.scheduleId === "number" && typeof r.payload.topic === "string"));
+check("spawn: task payload carries schedule context (incl. monitored sources)",
+  runRows.every((r) => typeof r.payload.scheduleId === "number" && typeof r.payload.topic === "string" && Array.isArray(r.payload.sources)));
 check("spawn: idempotency keys period-scoped", runRows.every((r) => /research_run:\d+:\d{4}-\d{2}-\d{2}$/.test(r.idempotency_key)));
 
 const s1upd = await updateSchedule(s1.id, { enabled: false, cadence: "hourly" });
@@ -225,4 +249,5 @@ await query(`DELETE FROM tasks WHERE kind = 'research_run' AND business_unit_id 
 await query(`DELETE FROM research_items WHERE business_unit_id = ANY($1::bigint[])`, [[buA, buB]]).catch(() => undefined);
 await query(`DELETE FROM research_schedules WHERE business_unit_id = ANY($1::bigint[])`, [[buA, buB]]).catch(() => undefined);
 await query(`DELETE FROM business_units WHERE id = ANY($1::bigint[])`, [[buA, buB]]).catch(() => undefined);
+void s3; void s3upd;
 process.exit(failures === 0 ? 0 : 1);

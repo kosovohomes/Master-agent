@@ -7,6 +7,7 @@ import {
   listCompetitorEvents,
   stats,
   createSchedule,
+  normalizeSources,
   ResearchServiceError,
 } from "@/lib/research/service";
 import type { ResearchCadence, ResearchItemStatus } from "@/lib/research/types";
@@ -86,6 +87,7 @@ export async function POST(req: Request) {
   const queries = Array.isArray(body.queries)
     ? body.queries.map((q) => String(q).trim()).filter((q) => q !== "").slice(0, 4)
     : [];
+  const sources = normalizeSources(body.sources);
 
   try {
     const schedule = await createSchedule({
@@ -94,6 +96,7 @@ export async function POST(req: Request) {
       name,
       topic,
       queries,
+      sources,
       cadence: cadence as ResearchCadence,
       maxItems: body.maxItems != null ? Number(body.maxItems) : undefined,
     });
@@ -105,7 +108,7 @@ export async function POST(req: Request) {
       resourceId: schedule.id,
       result: "success",
       requestId,
-      metadata: { businessUnitId, agentSlug, cadence: schedule.cadence, name: schedule.name },
+      metadata: { businessUnitId, agentSlug, cadence: schedule.cadence, name: schedule.name, sources: schedule.sources.length },
     });
     return NextResponse.json({ data: { schedule }, meta: { requestId } });
   } catch (e) {

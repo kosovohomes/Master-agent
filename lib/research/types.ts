@@ -20,6 +20,12 @@ export type ResearchItemStatus =
 
 export type ResearchCadence = "hourly" | "daily" | "weekly";
 
+/** A monitored acquisition source attached to a schedule (Phase 7 §P6). */
+export interface ResearchSourceRef {
+  kind: "url" | "rss" | "sitemap";
+  ref: string;
+}
+
 export interface ResearchSchedule {
   id: number;
   businessUnitId: number;
@@ -28,6 +34,8 @@ export interface ResearchSchedule {
   /** Topic template; {{date}} expands to the run date (YYYY-MM-DD). */
   topic: string;
   queries: string[];
+  /** Monitored sources fetched every run (works without any search API). */
+  sources: ResearchSourceRef[];
   cadence: ResearchCadence;
   maxItems: number;
   enabled: boolean;
