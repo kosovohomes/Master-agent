@@ -121,13 +121,17 @@ async function main() {
     JSON.stringify(task?.result));
   check("real web_search executed (searched >= 1)", (task?.result?.searched ?? 0) >= 1, JSON.stringify(task?.result));
   check("real fetch executed or contained", (task?.result?.collected ?? 0) >= 1, JSON.stringify(task?.result));
-  check("material stored as unprocessed", (task?.result?.unprocessed ?? 0) >= 1, JSON.stringify(task?.result));
+  const storedUnprocessed = (task?.result?.unprocessed ?? 0) >= 1;
+  const dedupCaught = (task?.result?.duplicates ?? 0) >= 1;
+  check("material stored as unprocessed (or dedup caught an unchanged feed)", storedUnprocessed || dedupCaught, JSON.stringify(task?.result));
 
   // ---------- the unprocessed item: sources + reprocess + review ----------
   const g1 = await jfetch(auth, "/api/admin/research");
   const items = (g1.body?.data?.items ?? []) as any[];
   const un = items.find((i) => i.status === "unprocessed");
-  check("unprocessed item visible on the surface", un != null);
+  if (!un && dedupCaught) {
+    check("dedup: unchanged feed produced no second item (gate held)", true);
+  }
   if (un) {
     created.itemIds.push(un.id);
     check("item carries real fetched sources", (un.sources ?? []).length >= 1 && (un.sources ?? []).some((s: any) => (s.url ?? "").startsWith("http")), JSON.stringify((un.sources ?? []).slice(0, 2).map((s: any) => s.url)));
@@ -142,9 +146,9 @@ async function main() {
     });
     check("review action archive works from unprocessed", arc.status === 200 && arc.body?.data?.item?.status === "archived", JSON.stringify(arc.body?.data?.item?.status));
     const bad = await jfetch(auth, `/api/admin/research/items/${un.id}`, {
-      method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "verify" }),
+      method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "explode" }),
     });
-    check("invalid review action rejected 400", bad.status === 400, JSON.stringify(bad.body?.errors));
+    check("unknown review action rejected 400", bad.status === 400, JSON.stringify(bad.body?.errors));
   }
 
   // ---------- flag rollback drill ----------

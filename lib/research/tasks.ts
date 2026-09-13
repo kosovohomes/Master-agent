@@ -172,6 +172,7 @@ export function makeResearchRunHandler(deps: {
           degradeReason: result.degradeReason ?? "unknown",
         });
         if (!rec.duplicate) result.unprocessed++;
+        else result.duplicates++; // unchanged material re-collected → gate held, count it
       }
       return { ...result };
     });
