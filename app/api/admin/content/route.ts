@@ -75,6 +75,17 @@ export async function POST(req: Request) {
 
   try {
     if (mode === "run") {
+      // Fail-closed at the API surface (same contract as the research
+      // run-now route): the flag OFF means no chain execution — the handler
+      // would skip anyway, but the caller gets an explicit 409 here.
+      if (!(await isFlagEnabled("content", false))) {
+        await writeAudit({
+          actorType: "user", actorId: gate.ctx.user?.id ?? null,
+          action: "content.run.spawn", resource: "content_items",
+          result: "denied", requestId, metadata: { reason: "content_flag_off" },
+        });
+        return NextResponse.json({ errors: [{ code: "CONTENT_DISABLED", detail: "the content flag is OFF" }] }, { status: 409 });
+      }
       const brief = body.brief != null ? String(body.brief).trim() : "";
       const researchItemId = body.researchItemId != null && /^\d+$/.test(String(body.researchItemId)) ? Number(body.researchItemId) : undefined;
       const contentItemId = body.contentItemId != null && /^\d+$/.test(String(body.contentItemId)) ? Number(body.contentItemId) : undefined;
