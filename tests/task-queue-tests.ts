@@ -103,7 +103,9 @@ try {
   check("future-scheduled task not claimable", claimFuture === null || claimFuture.id !== future.taskId);
 
   // ---------- retry / backoff / terminal ----------
-  const flaky = await spawnTask({ tenantId: tenantA, kind: "noop_probe", maxAttempts: 2 });
+  // priority 1: claim identity matters here — beat any older same-priority
+  // stragglers left by other suites on a shared persistent DB.
+  const flaky = await spawnTask({ tenantId: tenantA, kind: "noop_probe", maxAttempts: 2, priority: 1 });
   trackTask(flaky.taskId);
   await claimNextTask("w4"); // attempts → 1
   const fail1 = await failTask(flaky.taskId, new Error("boom 1"));

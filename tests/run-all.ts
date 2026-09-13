@@ -60,6 +60,11 @@ const files = [
   "tests/connectors-service-tests.ts",
   "tests/connectors-events-tests.ts",
   "tests/connectors-route-tests.ts",
+  // Phase 7 suites (research workforce)
+  "tests/research-tools-tests.ts",
+  "tests/research-pipeline-tests.ts",
+  "tests/research-service-tests.ts",
+  "tests/research-tasks-tests.ts",
 ];
 let failures = 0;
 for (const f of files) {

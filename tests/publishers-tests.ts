@@ -291,6 +291,13 @@ try {
     if (secret !== null) h["x-cron-secret"] = secret;
     return new Request("http://localhost/api/agents/sweep", { method: "POST", headers: h });
   };
+  // Re-run safety on a persistent DB: the engine's daily idempotency key
+  // (sweep:<day>) would swallow a second same-day invocation and the due
+  // draft would never post. Clear it so the route re-spawns the sweep task
+  // (CI is ephemeral; the staging database is not).
+  const sweepDayKey = `sweep:${new Date().toISOString().slice(0, 10)}`;
+  await query("DELETE FROM task_steps WHERE task_id IN (SELECT id FROM tasks WHERE idempotency_key = $1)", [sweepDayKey]).catch(() => undefined);
+  await query("DELETE FROM tasks WHERE idempotency_key = $1", [sweepDayKey]).catch(() => undefined);
   const stateAfter401 = async () => {
     const d = (await listDraftsByTenant(tF)).find((r) => r.id === routeId);
     return (await query<{ n: string }>("SELECT count(*)::text AS n FROM content_publications WHERE draft_id = $1", [routeId]))[0].n === "0" &&

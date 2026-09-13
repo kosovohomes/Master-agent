@@ -25,7 +25,9 @@ export type EventName =
   | "budget.hard_stop"
   | "knowledge.source.fetched"
   | "knowledge.source.failed"
-  | "connector.content.sync";
+  | "connector.content.sync"
+  | "research.finding"
+  | "research.escalated";
 
 /** v1 notification policy: which events page ops, and what the subject says. */
 const RULES: Record<EventName, { subject: (p: Record<string, unknown>) => string } | null> = {
@@ -47,6 +49,12 @@ const RULES: Record<EventName, { subject: (p: Record<string, unknown>) => string
   // Operations screen but never page-worthy on its own (failures surface as
   // task.failed / knowledge.source.failed which DO notify).
   "connector.content.sync": null,
+  // Phase 7: a clean finding is routine dashboard traffic; an ESCALATED one
+  // (ambiguous / low confidence, §109) pages ops — a human must judge it.
+  "research.finding": null,
+  "research.escalated": {
+    subject: (p) => `Research item #${p.itemId} escalated (${p.agentSlug}) — needs human review`,
+  },
 };
 
 async function opsEmail(): Promise<string | null> {

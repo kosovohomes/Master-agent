@@ -25,6 +25,7 @@ import type { GatewayClient } from "../ai/gateway";
 import { ai as defaultLlm } from "../ai";
 import { makeKnowledgeFetchHandler } from "../knowledge/tasks";
 import { knowledgeFetcher } from "../knowledge/fetchers";
+import { registerResearchHandlers } from "../research/tasks";
 import { dispatch, getTenantConfig } from "../agents/dispatch";
 import { routeAgent } from "../agents/core";
 import type { AgentGoal } from "../agents/types";
@@ -321,6 +322,21 @@ export function registerBuiltins(): void {
       return builtinLlm;
     },
   }));
+  // Phase 7: research workforce — the analysis call rides the gateway with
+  // per-task attribution (BU + task + agent, purpose="research") so budget
+  // ceilings and the llm_requests ledger cover the workforce.
+  registerResearchHandlers((task: { business_unit_id: number | null; id: number; payload: Record<string, unknown> }) => {
+    const gateway = builtinLlm as LLMClient & Partial<GatewayClient>;
+    if (typeof gateway.withAttribution === "function") {
+      return gateway.withAttribution({
+        businessUnitId: task.business_unit_id,
+        taskId: task.id,
+        agentSlug: (task.payload as { agentSlug?: string }).agentSlug ?? "research",
+        purpose: "research",
+      });
+    }
+    return builtinLlm;
+  });
 }
 
 // Test seam: override the LLM client used by the builtin agent_dispatch.

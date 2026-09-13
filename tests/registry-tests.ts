@@ -45,9 +45,14 @@ try {
   check("ambassador is NOT a registry row (fold decision)",
     !agents.some((a) => a.slug === "ambassador"));
   const placeholders = ["supervisor", "intelligence", "legal_intelligence", "competitor", "content_strategy", "content", "fact_check", "seo", "social_media", "lead", "customer_inquiry", "customer_support", "analytics", "strategy", "reporting"];
-  check("all 15 future-workforce placeholders seeded disabled",
-    placeholders.every((s) => agents.find((a) => a.slug === s)?.status === "disabled"));
-  check("registry has 19 rows (4 active + 15 placeholders)", agents.length === 19, `n=${agents.length}`);
+  // Phase 7 (migration 029) activates the research workforce trio; the
+  // remaining twelve placeholders stay disabled until their phases arrive.
+  const activated7 = ["intelligence", "legal_intelligence", "competitor"];
+  check("Phase 7 workforce trio activated (migration 029)",
+    activated7.every((s) => agents.find((a) => a.slug === s)?.status === "active"));
+  check("remaining 12 future-workforce placeholders still disabled",
+    placeholders.filter((s) => !activated7.includes(s)).every((s) => agents.find((a) => a.slug === s)?.status === "disabled"));
+  check("registry has 19 rows (4 active + 3 Phase 7 + 12 placeholders)", agents.length === 19, `n=${agents.length}`);
 
   // golden prompts: version 1 of each survivor matches the legacy role line
   const golden: Record<string, string> = {
@@ -58,26 +63,37 @@ try {
   };
   for (const [slug, expected] of Object.entries(golden)) {
     const a = await getAgentBySlug(slug);
-    const v = a ? await currentVersion(a.id) : null;
-    check(`golden prompt v1 preserved for ${slug}`, v?.systemPrompt === expected && v?.version === 1);
+    const v1row = a ? (await listVersions(a.id)).find((v) => v.version === 1) : null;
+    check(`golden prompt v1 preserved for ${slug}`, v1row?.systemPrompt === expected);
+  }
+  // Phase 7: research carries a versioned workforce prompt on top of v1.
+  {
+    const a = await getAgentBySlug("research");
+    const cur = a ? await currentVersion(a.id) : null;
+    check("research current version is the Phase 7 workforce prompt",
+      cur != null && cur.version >= 2 && cur.systemPrompt.includes("Research Agent"),
+      `v=${cur?.version}`);
   }
 
-  // ---------- versioning ----------
+  // ---------- versioning (relative — migration 029 added a version) ----------
   const [research] = agents.filter((a) => a.slug === "research");
+  const baseVer = (await listVersions(research.id))[0]?.version ?? 1;
   const v2 = await createAgentVersion({
     agentId: research.id,
     systemPrompt: "Research agent v2: deep-dive brief with confidence scores.",
     changelog: "test: second version",
   });
-  check("createAgentVersion appends next version", v2.version === 2);
+  check("createAgentVersion appends next version", v2.version === baseVer + 1);
   const cur = await currentVersion(research.id);
-  check("currentVersion returns the max version", cur?.id === v2.id && cur.version === 2);
+  check("currentVersion returns the max version", cur?.id === v2.id && cur.version === baseVer + 1);
   const hist = await listVersions(research.id);
-  check("version history is complete and ordered desc", hist.length === 2 && hist[0].version === 2 && hist[1].version === 1);
+  check("version history is complete and ordered desc", hist.length === baseVer + 1 && hist[0].version === baseVer + 1 && hist[hist.length - 1].version === 1);
   createdAgentIds.push(research.id); // only tag for cleanup; restore below
-  // restore: append a v3 equal to the golden prompt (versions are immutable)
-  await createAgentVersion({ agentId: research.id, systemPrompt: golden.research, changelog: "test: restore golden" });
-  check("restore version appended", (await currentVersion(research.id))?.version === 3);
+  // restore: append a version equal to the Phase 7 workforce prompt (versions
+  // are immutable; the pipeline reads the current row)
+  const phase7Prompt = "You are the Research Agent for a business unit. Given a topic and a set of SOURCE excerpts, judge relevance and produce a concise intelligence finding. Cite sources by their [n] index. Score relevance 0-100. If the sources do not support a defensible finding, set ambiguous=true instead of guessing. Never fabricate facts not present in the sources.";
+  await createAgentVersion({ agentId: research.id, systemPrompt: phase7Prompt, changelog: "test: restore Phase 7 prompt" });
+  check("restore version appended", (await currentVersion(research.id))?.version === baseVer + 2);
 
   // ---------- status flip propagates (acceptance: <= 1 run, zero deploys) ----------
   const runnableBefore = await checkRunnable("research", null);

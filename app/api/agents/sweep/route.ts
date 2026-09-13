@@ -6,6 +6,7 @@ import { isFlagEnabled } from "@/lib/settings";
 import { writeAudit, requestIdFor } from "@/lib/audit";
 import { tick, triggerWorkflow, settleWorkflowRun } from "@/lib/tasks/engine";
 import { spawnDueKnowledgeFetches } from "@/lib/knowledge/service";
+import { spawnDueResearchRuns } from "@/lib/research/service";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -62,6 +63,7 @@ async function handle(req: Request) {
 
   let tickResult: Awaited<ReturnType<typeof tick>> | null = null;
   let knowledgeSpawned: Awaited<ReturnType<typeof spawnDueKnowledgeFetches>> | null = null;
+  let researchSpawned: Awaited<ReturnType<typeof spawnDueResearchRuns>> | null = null;
   if (triggered) {
     tickResult = await tick({ workerId: "cron-sweep", batch: 20 });
     await settleWorkflowRun(triggered.workflowRunId);
@@ -73,12 +75,19 @@ async function handle(req: Request) {
     knowledgeSpawned = await spawnDueKnowledgeFetches().catch(() => null);
   }
 
+  // Phase 7: scheduled research workforce — due schedules spawn research_run
+  // tasks (period-idempotent). The flag is the kill switch, as with knowledge.
+  if (await isFlagEnabled("research", false)) {
+    researchSpawned = await spawnDueResearchRuns().catch(() => null);
+  }
+
   await writeAudit({
     actorType: "system", actorLabel: "cron", action: "publishing.sweep", resource: "drafts",
     result: "success", requestId,
     metadata: {
       mode: "engine", workflow: triggered ?? null, tick: tickResult as unknown as Record<string, unknown> | null,
       knowledgeSpawned: knowledgeSpawned as unknown as Record<string, unknown> | null,
+      researchSpawned: researchSpawned as unknown as Record<string, unknown> | null,
     },
   });
   return NextResponse.json({
@@ -87,6 +96,7 @@ async function handle(req: Request) {
       workflow: triggered,
       tick: tickResult,
       knowledgeSpawned,
+      researchSpawned,
     },
     meta: { requestId },
   });

@@ -965,6 +965,166 @@ JOIN permissions p ON p.key = 'connectors.manage'
 WHERE r.key IN ('owner','administrator')
 ON CONFLICT DO NOTHING;`;
 
+/**
+ * Phase 7 (research workforce, Phase 0.5 §6.2 P6 / §52–§53 / §59 / §137 —
+ * pulled forward from roadmap P6 per the Phase 6 report §18). MVP use case
+ * #1: daily AI/legal-AI intelligence without a human trigger.
+ *
+ *  - research_schedules: the scheduled research workflow configuration —
+ *    which BU, which workforce agent, which topic ({{date}}-templated) and
+ *    extra queries, at which cadence, with a per-run findings cap. One row
+ *    per (BU, name); the durable per-run execution is a research_run task.
+ *  - research_items: findings storage with the §109-shaped lifecycle —
+ *    'unprocessed' (material collected, LLM unavailable → degraded mode),
+ *    'finding' (cited + scored), 'escalated' (ambiguous / low confidence →
+ *    human attention), then human review 'verified' / 'rejected' /
+ *    'archived'. Sources carry full citation provenance; material keeps the
+ *    fetched excerpts so an unprocessed item can be re-analyzed later.
+ *    UNIQUE (business_unit_id, dedup_hash) is THE content dedup gate.
+ *  - competitors + competitor_events (§59): competitor registry per BU and
+ *    the detected-events log with snapshot; events link back to the finding
+ *    that produced them.
+ *
+ *  Additive only — no existing table is touched.
+ */
+const M_029_RESEARCH_WORKFORCE = `
+CREATE TABLE IF NOT EXISTS research_schedules (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  business_unit_id BIGINT NOT NULL REFERENCES business_units(id) ON DELETE CASCADE,
+  agent_slug TEXT NOT NULL DEFAULT 'research'
+    CHECK (agent_slug IN ('research','intelligence','legal_intelligence','competitor')),
+  name TEXT NOT NULL,
+  topic TEXT NOT NULL,
+  queries JSONB NOT NULL DEFAULT '[]'::jsonb,
+  cadence TEXT NOT NULL DEFAULT 'daily' CHECK (cadence IN ('hourly','daily','weekly')),
+  max_items INT NOT NULL DEFAULT 5 CHECK (max_items BETWEEN 1 AND 20),
+  enabled BOOLEAN NOT NULL DEFAULT true,
+  last_run_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (business_unit_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS research_items (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  business_unit_id BIGINT NOT NULL REFERENCES business_units(id) ON DELETE CASCADE,
+  schedule_id BIGINT REFERENCES research_schedules(id) ON DELETE SET NULL,
+  agent_slug TEXT NOT NULL,
+  topic TEXT NOT NULL,
+  query TEXT,
+  status TEXT NOT NULL DEFAULT 'unprocessed'
+    CHECK (status IN ('unprocessed','finding','escalated','verified','rejected','archived')),
+  title TEXT,
+  summary TEXT,
+  analysis JSONB,
+  score INT CHECK (score BETWEEN 0 AND 100),
+  confidence NUMERIC(4,3) CHECK (confidence BETWEEN 0 AND 1),
+  sources JSONB NOT NULL DEFAULT '[]'::jsonb,
+  material TEXT,
+  dedup_hash TEXT NOT NULL,
+  prompt_version INT,
+  prompt_hash TEXT,
+  task_id BIGINT REFERENCES tasks(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  reviewed_at TIMESTAMPTZ,
+  reviewed_by TEXT,
+  UNIQUE (business_unit_id, dedup_hash)
+);
+
+CREATE INDEX IF NOT EXISTS idx_research_items_bu_status
+  ON research_items (business_unit_id, status, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS competitors (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  business_unit_id BIGINT NOT NULL REFERENCES business_units(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  url TEXT,
+  notes TEXT,
+  enabled BOOLEAN NOT NULL DEFAULT true,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (business_unit_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS competitor_events (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  business_unit_id BIGINT NOT NULL REFERENCES business_units(id) ON DELETE CASCADE,
+  competitor_id BIGINT NOT NULL REFERENCES competitors(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL DEFAULT 'other'
+    CHECK (kind IN ('pricing','product','announcement','content','other')),
+  title TEXT NOT NULL,
+  url TEXT,
+  snapshot JSONB,
+  research_item_id BIGINT REFERENCES research_items(id) ON DELETE SET NULL,
+  detected_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_competitor_events_competitor
+  ON competitor_events (competitor_id, detected_at DESC);
+
+-- Workforce activation (Phase 0.5 §6.2: these rows were seeded disabled at
+-- P2; their phase flips them on). 'research' stays bound/active — the legacy
+-- bound executor keeps serving legacy dispatch; the pipeline reads its
+-- VERSIONED prompt below.
+UPDATE agents SET status = 'active', updated_at = now()
+WHERE slug IN ('intelligence','legal_intelligence','competitor') AND status = 'disabled';
+
+-- Versioned prompts (§6.4 invariant: agents are data; prompts are versioned
+-- rows, never inline code). COALESCE(max(version),0)+1 per agent.
+INSERT INTO agent_versions (agent_id, version, system_prompt, config, changelog)
+SELECT a.id, COALESCE(max(v.version), 0) + 1,
+       'You are the Research Agent for a business unit. Given a topic and a set of SOURCE excerpts, judge relevance and produce a concise intelligence finding. Cite sources by their [n] index. Score relevance 0-100. If the sources do not support a defensible finding, set ambiguous=true instead of guessing. Never fabricate facts not present in the sources.',
+       '{"outputSchema":"research_finding_v1"}'::jsonb,
+       'Phase 7 (P6): research workforce v1 prompt'
+FROM agents a LEFT JOIN agent_versions v ON v.agent_id = a.id
+WHERE a.slug = 'research' GROUP BY a.id;
+
+INSERT INTO agent_versions (agent_id, version, system_prompt, config, changelog)
+SELECT a.id, COALESCE(max(v.version), 0) + 1,
+       'You are the Intelligence Agent. Given a topic and SOURCE excerpts, synthesize market/competitor intelligence: implications, opportunities, risks, and recommended actions. Cite sources by [n] index, score overall materiality 0-100, set ambiguous=true when sources are insufficient. Never fabricate facts not present in the sources.',
+       '{"outputSchema":"intelligence_analysis_v1"}'::jsonb,
+       'Phase 7 (P6): research workforce v1 prompt'
+FROM agents a LEFT JOIN agent_versions v ON v.agent_id = a.id
+WHERE a.slug = 'intelligence' GROUP BY a.id;
+
+INSERT INTO agent_versions (agent_id, version, system_prompt, config, changelog)
+SELECT a.id, COALESCE(max(v.version), 0) + 1,
+       'You are the Legal Intelligence Agent for a legal-domain business unit. Given a legal/regulatory topic and SOURCE excerpts, produce a monitoring finding: what happened, jurisdiction, practical implications, compliance risks, recommended actions. Cite sources by [n] index, score materiality 0-100, set ambiguous=true when sources are insufficient. Never fabricate facts not present in the sources.',
+       '{"outputSchema":"intelligence_analysis_v1"}'::jsonb,
+       'Phase 7 (P6): research workforce v1 prompt'
+FROM agents a LEFT JOIN agent_versions v ON v.agent_id = a.id
+WHERE a.slug = 'legal_intelligence' GROUP BY a.id;
+
+INSERT INTO agent_versions (agent_id, version, system_prompt, config, changelog)
+SELECT a.id, COALESCE(max(v.version), 0) + 1,
+       'You are the Competitor Agent. Given tracked competitor names and SOURCE excerpts, detect concrete competitor events (pricing changes, product launches, announcements, notable content) and attribute each to the right competitor and event kind. Cite sources by [n] index, score significance 0-100, set ambiguous=true when attribution is not defensible. Never fabricate facts not present in the sources.',
+       '{"outputSchema":"research_finding_v1"}'::jsonb,
+       'Phase 7 (P6): research workforce v1 prompt'
+FROM agents a LEFT JOIN agent_versions v ON v.agent_id = a.id
+WHERE a.slug = 'competitor' GROUP BY a.id;`;
+
+/**
+ * Phase 7 flag + permission (same pattern as 022/026/028): the `research`
+ * flag is the platform-level kill switch for the research workforce (routes
+ * fail closed 404 and the cron sweep stops spawning when OFF); the
+ * `research.manage` permission gates the /research surface for owner and
+ * administrator roles.
+ */
+const M_030_RESEARCH_FLAG_PERMS = `
+INSERT INTO feature_flags (key, enabled, emergency, description)
+VALUES ('research', TRUE, FALSE,
+        'Research workforce: scheduled research/intelligence runs, findings, competitor events (OFF = no research execution)')
+ON CONFLICT (key) DO NOTHING;
+
+INSERT INTO permissions (key) VALUES ('research.manage') ON CONFLICT (key) DO NOTHING;
+
+INSERT INTO role_permissions (role_id, permission_id)
+SELECT r.id, p.id FROM roles r
+JOIN permissions p ON p.key = 'research.manage'
+WHERE r.key IN ('owner','administrator')
+ON CONFLICT DO NOTHING;`;
+
 export const MIGRATIONS: MigrationDef[] = [
   { version: "000", name: "agentos_legacy_baseline", source: M_000_LEGACY_BASELINE },
   { version: "001", name: "schema_migrations", source: M_001_SCHEMA_MIGRATIONS },
@@ -995,4 +1155,6 @@ export const MIGRATIONS: MigrationDef[] = [
   { version: "026", name: "knowledge_flag_permissions", source: M_026_KNOWLEDGE_FLAG_PERMS },
   { version: "027", name: "website_connectors", source: M_027_WEBSITE_CONNECTORS },
   { version: "028", name: "connectors_flag_permissions", source: M_028_CONNECTORS_FLAG_PERMS },
+  { version: "029", name: "research_workforce", source: M_029_RESEARCH_WORKFORCE },
+  { version: "030", name: "research_flag_permissions", source: M_030_RESEARCH_FLAG_PERMS },
 ];
