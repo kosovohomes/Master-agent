@@ -50,6 +50,8 @@ const files = [
   "tests/budgets-tests.ts",
   "tests/structured-tests.ts",
   "tests/call-site-grep-tests.ts",
+  // Phase 10.5 suites
+  "tests/ai-providers-tests.ts",
   // Phase 5 suites
   "tests/knowledge-chunking-tests.ts",
   "tests/knowledge-fetchers-tests.ts",

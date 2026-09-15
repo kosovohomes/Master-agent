@@ -5,8 +5,10 @@
  *
  *   flag gate      ai_gateway feature flag OFF → raw provider passthrough
  *                  (the rollback path: pre-Phase-4 behavior, zero deploys)
+ *   provider       LLM_PROVIDER env → resolve.ts adapter (openai | gemini |
+ *                  groq | openrouter | custom); ledger carries the real name
  *   routing        explicit opts.model > per-agent model (attribution-borne)
- *                  > OPENAI_MODEL env > default
+ *                  > provider-aware default (defaultChatModelFor)
  *   budgets        pre-call hard-stop (BudgetExceededError, SEC-L9);
  *                  post-call re-check pages ops via the event bus
  *   rate limit     per-BU call-rate limit (DB-backed buckets, global)
@@ -30,7 +32,7 @@ import {
   LlmRateLimitedError,
   ProviderHttpError,
 } from "./types";
-import { makeOpenAI } from "./providers/openai";
+import { resolveProviderSafe, defaultChatModelFor, defaultEmbedModelFor } from "./providers/resolve";
 import { priceFor, computeCostUsd } from "./prices";
 import { recordRequest } from "./usage";
 import { checkBudgets, firstOverBudgetAfterCall, hardStopEventOnCooldown } from "./budgets";
@@ -39,8 +41,10 @@ import { rateLimit } from "../security/ratelimit";
 
 export interface GatewayDeps {
   fetchImpl?: typeof fetch;
-  /** Tests inject a stub provider; production resolves the OpenAI adapter. */
+  /** Tests inject a stub provider; production resolves via LLM_PROVIDER (resolve.ts). */
   provider?: ProviderClient;
+  /** Ledger provider name for an injected stub (default "openai" — test compat). */
+  providerName?: string;
   /** Fallback chain for retriable chat failures (first entry = primary). */
   fallbackModels?: string[];
   timeoutMs?: number;
@@ -88,7 +92,11 @@ export interface GatewayClient extends LLMClient {
 }
 
 export function makeGatewayClient(deps: GatewayDeps = {}): GatewayClient {
-  const provider = deps.provider ?? makeOpenAI(deps.fetchImpl);
+  const resolved = deps.provider
+    ? { name: deps.providerName ?? "openai", client: deps.provider }
+    : resolveProviderSafe(deps.fetchImpl);
+  const provider = resolved.client;
+  const providerName = resolved.name;
   const timeoutMs = deps.timeoutMs ?? Number(process.env.LLM_TIMEOUT_MS ?? 60_000);
   const configuredChain = deps.fallbackModels ?? envFallbackModels();
   const ratePerMin = deps.ratePerMin ?? Number(process.env.LLM_RATE_PER_MIN ?? 120);
@@ -114,7 +122,7 @@ export function makeGatewayClient(deps: GatewayDeps = {}): GatewayClient {
     const rl = await rateLimit(`llm:bu:${attr.businessUnitId}`, ratePerMin, 60_000);
     if (!rl.allowed) {
       await recordRequest({
-        provider: "openai",
+        provider: providerName,
         kind: "chat",
         model: "pre-call",
         status: "rate_limited",
@@ -137,7 +145,7 @@ export function makeGatewayClient(deps: GatewayDeps = {}): GatewayClient {
     await checkBudgets(attr).catch(async (e) => {
       if (e instanceof BudgetExceededError) {
         await recordRequest({
-          provider: "openai",
+          provider: providerName,
           kind: "chat",
           model: opts.model ?? "pre-call",
           status: "budget_blocked",
@@ -152,7 +160,10 @@ export function makeGatewayClient(deps: GatewayDeps = {}): GatewayClient {
 
     await enforceRateLimit(attr);
 
-    const primary = opts.model ?? process.env.OPENAI_MODEL ?? "gpt-4o-mini";
+    const primary = opts.model ?? defaultChatModelFor(providerName);
+    if (!primary) {
+      throw new Error(`model required for provider "${providerName}": pass opts.model or set LLM_CHAT_MODEL`);
+    }
     const chain = [primary, ...configuredChain.filter((m) => m !== primary)];
     const attempts: Array<{ model: string; status?: number; code?: string; message: string }> = [];
 
@@ -162,10 +173,10 @@ export function makeGatewayClient(deps: GatewayDeps = {}): GatewayClient {
       try {
         const out = await provider.completeWithUsage(messages, { model, temperature: opts.temperature, timeoutMs });
         const latencyMs = Date.now() - startedAt;
-        const price = await priceFor("openai", out.model, "chat");
+        const price = await priceFor(providerName, out.model, "chat");
         const costUsd = computeCostUsd(price, out.usage);
         await recordRequest({
-          provider: "openai",
+          provider: providerName,
           kind: "chat",
           model: out.model,
           status: "ok",
@@ -188,7 +199,7 @@ export function makeGatewayClient(deps: GatewayDeps = {}): GatewayClient {
         const errorCode = http ? http.code : e instanceof Error && e.name === "AbortError" ? "timeout" : "provider_error";
         attempts.push({ model, status: http?.status, code: errorCode, message: e instanceof Error ? e.message : String(e) });
         await recordRequest({
-          provider: "openai",
+          provider: providerName,
           kind: "chat",
           model,
           status: "error",
@@ -212,7 +223,7 @@ export function makeGatewayClient(deps: GatewayDeps = {}): GatewayClient {
     await checkBudgets(attr).catch(async (e) => {
       if (e instanceof BudgetExceededError) {
         await recordRequest({
-          provider: "openai",
+          provider: providerName,
           kind: "embed",
           model: "pre-call",
           status: "budget_blocked",
@@ -229,10 +240,10 @@ export function makeGatewayClient(deps: GatewayDeps = {}): GatewayClient {
     try {
       const out = await provider.embedWithUsage(texts, { timeoutMs });
       const latencyMs = Date.now() - startedAt;
-      const price = await priceFor("openai", out.model, "embed");
+      const price = await priceFor(providerName, out.model, "embed");
       const costUsd = computeCostUsd(price, { promptTokens: out.usage.promptTokens, completionTokens: null });
       await recordRequest({
-        provider: "openai",
+        provider: providerName,
         kind: "embed",
         model: out.model,
         status: "ok",
@@ -248,9 +259,9 @@ export function makeGatewayClient(deps: GatewayDeps = {}): GatewayClient {
     } catch (e) {
       const http = e instanceof ProviderHttpError ? e : null;
       await recordRequest({
-        provider: "openai",
+        provider: providerName,
         kind: "embed",
-        model: process.env.OPENAI_EMBEDDINGS_MODEL ?? "text-embedding-3-small",
+        model: defaultEmbedModelFor(providerName),
         status: "error",
         attribution: attr,
         latencyMs: Date.now() - startedAt,
