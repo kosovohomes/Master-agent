@@ -47,8 +47,9 @@ try {
   const placeholders = ["supervisor", "intelligence", "legal_intelligence", "competitor", "content_strategy", "content", "fact_check", "seo", "social_media", "lead", "customer_inquiry", "customer_support", "analytics", "strategy", "reporting"];
   // Phase 7 (migration 029) activates the research workforce trio; Phase 8
   // (migration 033) activates the content workforce trio; Phase 9 (migration
-  // 035) activates the seo agent; the remaining eight placeholders stay
-  // disabled until their phases arrive.
+  // 035) activates the seo agent; Phase 10 (migration 038) activates the
+  // social_media agent; the remaining seven placeholders stay disabled until
+  // their phases arrive.
   const activated7 = ["intelligence", "legal_intelligence", "competitor"];
   check("Phase 7 workforce trio activated (migration 029)",
     activated7.every((s) => agents.find((a) => a.slug === s)?.status === "active"));
@@ -57,9 +58,11 @@ try {
     activated8.every((s) => agents.find((a) => a.slug === s)?.status === "active"));
   check("Phase 9 seo agent activated (migration 035)",
     agents.find((a) => a.slug === "seo")?.status === "active");
-  check("remaining 8 future-workforce placeholders still disabled",
-    placeholders.filter((s) => !activated7.includes(s) && !activated8.includes(s) && s !== "seo").every((s) => agents.find((a) => a.slug === s)?.status === "disabled"));
-  check("registry has 19 rows (4 active + 3 Phase 7 + 3 Phase 8 + 1 Phase 9 + 8 placeholders)", agents.length === 19, `n=${agents.length}`);
+  check("Phase 10 social_media agent activated (migration 038)",
+    agents.find((a) => a.slug === "social_media")?.status === "active");
+  check("remaining 7 future-workforce placeholders still disabled",
+    placeholders.filter((s) => !activated7.includes(s) && !activated8.includes(s) && s !== "seo" && s !== "social_media").every((s) => agents.find((a) => a.slug === s)?.status === "disabled"));
+  check("registry has 19 rows (4 active + 3 Phase 7 + 3 Phase 8 + 1 Phase 9 + 1 Phase 10 + 7 placeholders)", agents.length === 19, `n=${agents.length}`);
 
   // golden prompts: version 1 of each survivor matches the legacy role line
   const golden: Record<string, string> = {
