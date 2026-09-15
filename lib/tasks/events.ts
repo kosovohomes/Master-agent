@@ -33,7 +33,10 @@ export type EventName =
   | "content.item.created"
   | "content.state_changed"
   | "content.approved"
-  | "content.rejected";
+  | "content.rejected"
+  | "social.posted"
+  | "social.failed"
+  | "social.sweep";
 
 /** v1 notification policy: which events page ops, and what the subject says. */
 const RULES: Record<EventName, { subject: (p: Record<string, unknown>) => string } | null> = {
@@ -75,6 +78,14 @@ const RULES: Record<EventName, { subject: (p: Record<string, unknown>) => string
   "content.rejected": {
     subject: (p) => `Content item #${p.itemId} rejected (${p.to}) — reviewer left a decision reason`,
   },
+  // Phase 10: social workforce — successful posts are routine /social-screen
+  // traffic; a FAILED publish pages ops (same policy as publish.failed); the
+  // sweep summary is observable but silent.
+  "social.posted": null,
+  "social.failed": {
+    subject: (p) => `Social publish failed for post #${p.postId} (${p.platform})`,
+  },
+  "social.sweep": null,
 };
 
 async function opsEmail(): Promise<string | null> {

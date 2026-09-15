@@ -28,6 +28,7 @@ import { knowledgeFetcher } from "../knowledge/fetchers";
 import { registerResearchHandlers } from "../research/tasks";
 import { registerContentHandlers } from "../content/tasks";
 import { registerSeoHandlers } from "../seo/tasks";
+import { registerSocialHandlers } from "../social/tasks";
 import { dispatch, getTenantConfig } from "../agents/dispatch";
 import { routeAgent } from "../agents/core";
 import type { AgentGoal } from "../agents/types";
@@ -39,6 +40,7 @@ import { registerTaskHandler } from "./handlers";
 import type { TaskHandler, TaskHandlerInput } from "./types";
 import { heartbeat } from "./queue";
 import { emitEvent } from "./events";
+import { TaskCancelledError } from "./types";
 
 /** Thrown by handlers to park a task as ESCALATED (human attention required). */
 export class TaskEscalatedError extends Error {
@@ -48,13 +50,8 @@ export class TaskEscalatedError extends Error {
   }
 }
 
-/** Thrown by handlers when a cooperative cancellation lands mid-run. */
-export class TaskCancelledError extends Error {
-  constructor(message = "task cancelled") {
-    super(message);
-    this.name = "TaskCancelledError";
-  }
-}
+/** Re-exported from types.ts (Phase 10 move) so existing imports keep working. */
+export { TaskCancelledError } from "./types";
 
 /** Shared publication idempotency key: one draft → at most one publish. */
 export function publicationKey(draftId: number): string {
@@ -368,6 +365,10 @@ export function registerBuiltins(): void {
     }
     return builtinLlm;
   });
+  // Phase 10: social workforce — the sweep is deterministic machinery (no
+  // LLM leg inside the sweep; platform variants are generated at scheduling
+  // time, where the gateway is invoked with purpose="social").
+  registerSocialHandlers();
 }
 
 // Test seam: override the LLM client used by the builtin agent_dispatch.

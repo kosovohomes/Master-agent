@@ -100,6 +100,20 @@ export interface TaskHandlerInput {
 
 export type TaskHandler = (input: TaskHandlerInput) => Promise<Record<string, unknown> | void>;
 
+/**
+ * Thrown by handlers when a cooperative cancellation lands mid-run. The
+ * engine catches this EXACT class (instanceof), so all handlers import it
+ * from here — a lookalike class would silently degrade cancellations into
+ * ordinary failures. (Phase 10: moved from executors.ts so the social sweep
+ * module can use it without an import cycle through executors.)
+ */
+export class TaskCancelledError extends Error {
+  constructor(message = "task cancelled") {
+    super(message);
+    this.name = "TaskCancelledError";
+  }
+}
+
 export interface TickResult {
   claimed: number;
   succeeded: number;

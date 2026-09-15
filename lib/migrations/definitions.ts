@@ -49,6 +49,18 @@
  *       immutable review columns, evidence JSONB, dedup UNIQUE per BU) +
  *       seo agent activation + versioned v1 prompt ·
  *   036 seo flag + seo.manage permission
+ * Phase 10 (§11 P9 — social workforce, §38/§197/§219/§466 + SEC-L5 OAuth
+ * lifecycle; acceptance: one approved item → per-platform scheduled posts,
+ * nothing publishes without approval):
+ *   037 social_campaigns + social_accounts (absorbs social-kind channels per
+ *       §197 with BU resolution via legacy_tenant_id; LinkedIn account-ref
+ *       fix = account_ref column) + social_posts (linked to content_items,
+ *       per-platform rows, time-semantics scheduling, FSM, partial UNIQUE
+ *       one-active-post per (item, platform)) + social_post_metrics +
+ *       content_publications.social_post_id (additive; draft_id nullable) +
+ *       scheduled_social_sweep workflow seed ·
+ *   038 social_media agent activation + versioned v1 prompt ·
+ *   039 social flag + social.manage permission
  *
  * 000 records the pre-existing AgentOS baseline (the 11 legacy tables) so the
  * ledger is complete even on a database provisioned from empty. On the live
@@ -1457,6 +1469,212 @@ JOIN permissions p ON p.key = 'seo.manage'
 WHERE r.key IN ('owner','administrator')
 ON CONFLICT DO NOTHING;`;
 
+/**
+ * Phase 10 — social workforce (§11 P9, §38, §197, §219, §466).
+ *
+ * Contracts:
+ *  - channels absorption (§197): social-kind channel rows are COPIED into
+ *    social_accounts (idempotent backfill, BU resolved via
+ *    business_units.legacy_tenant_id). channels is never dropped or renamed
+ *    (additive-first, §5) — the legacy drafts sweep keeps reading it; new
+ *    social writes go to social_accounts ONLY (write-stop for the social
+ *    workforce). Email stays on channels/website_integrations for the
+ *    connectors integration phase (documented decision, Phase 10 report).
+ *  - LinkedIn account-ref fix (R4): account_ref column carries the author
+ *    URN / platform user id; required for linkedin at connect time.
+ *  - Credentials reuse the Phase 2 SEC-L2 key-id envelope (v2 wire format)
+ *    via lib/channels encrypt/decrypt — one crypto implementation, one
+ *    rotation story.
+ *  - social_posts are ALWAYS linked to content_items (§466: social_posts
+ *    linked to content). The approval guarantee is structural: an item must
+ *    be APPROVED (or later, SCHEDULED via workforce sync) before posts can
+ *    be created, so nothing publishes without approval unless a future
+ *    policy phase says so.
+ *  - Time semantics (§466 "scheduling calendar, not cron pile"): every post
+ *    row carries scheduled_at TIMESTAMPTZ; the calendar API groups by day;
+ *    the sweep claims due posts (scheduled_at <= now()) — publication
+ *    precision is bounded only by cron cadence (documented).
+ *  - One-active-post invariant: partial UNIQUE (content_item_id, platform)
+ *    WHERE status <> 'cancelled' — duplicate scheduling of the same item to
+ *    the same platform is rejected by the DB, not just the service.
+ *  - Publication ledger: content_publications gains social_post_id
+ *    (additive) and draft_id becomes nullable — the SAME idempotent claim
+ *    (UNIQUE idempotency_key, §88) covers the social sweep, keyed
+ *    social:<post_id>:<scheduled_at>, so concurrent sweeps produce exactly
+ *    one publish per scheduled attempt.
+ */
+const M_037_SOCIAL_WORKFORCE = `
+CREATE TABLE IF NOT EXISTS social_campaigns (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  business_unit_id BIGINT NOT NULL REFERENCES business_units(id) ON DELETE CASCADE,
+  website_id BIGINT REFERENCES websites(id) ON DELETE SET NULL,
+  name TEXT NOT NULL,
+  objective TEXT,
+  status TEXT NOT NULL DEFAULT 'planning'
+    CHECK (status IN ('planning','active','paused','completed')),
+  starts_at TIMESTAMPTZ,
+  ends_at TIMESTAMPTZ,
+  created_by_user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (business_unit_id, name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_social_campaigns_bu_status
+  ON social_campaigns (business_unit_id, status, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS social_accounts (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  business_unit_id BIGINT NOT NULL REFERENCES business_units(id) ON DELETE CASCADE,
+  website_id BIGINT REFERENCES websites(id) ON DELETE SET NULL,
+  platform TEXT NOT NULL CHECK (platform IN ('linkedin','x','instagram','tiktok')),
+  display_name TEXT,
+  account_ref TEXT,
+  credentials_encrypted TEXT NOT NULL,
+  oauth_status TEXT NOT NULL DEFAULT 'connected'
+    CHECK (oauth_status IN ('connected','expired','revoked','error')),
+  scopes TEXT,
+  source TEXT NOT NULL DEFAULT 'manual'
+    CHECK (source IN ('manual','oauth','backfill')),
+  health TEXT NOT NULL DEFAULT 'healthy' CHECK (health IN ('healthy','unhealthy')),
+  token_expires_at TIMESTAMPTZ,
+  last_checked_at TIMESTAMPTZ,
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Dedup identity: COALESCE expression (not a table-level UNIQUE) so that
+-- accounts WITHOUT an account_ref still dedup deterministically — Postgres
+-- treats NULLs as distinct in plain UNIQUE constraints, which would allow
+-- unbounded duplicate manual connects for the same platform.
+CREATE UNIQUE INDEX IF NOT EXISTS social_accounts_bu_platform_ref
+  ON social_accounts (business_unit_id, platform, COALESCE(account_ref, ''));
+
+CREATE INDEX IF NOT EXISTS idx_social_accounts_bu_platform
+  ON social_accounts (business_unit_id, platform, health);
+
+-- §197 absorption backfill: copy social-kind channels into social_accounts,
+-- resolving the BU via the Phase 1 1:1 tenant backfill. Idempotent: the
+-- COALESCE expression UNIQUE index + bare ON CONFLICT DO NOTHING makes
+-- re-runs no-ops. account_ref from channels.target (migration 009).
+INSERT INTO social_accounts
+  (business_unit_id, platform, display_name, account_ref, credentials_encrypted,
+   oauth_status, source, health, metadata, created_at, updated_at)
+SELECT b.id, c.kind, COALESCE(c.display_name, c.kind),
+       c.target, c.token_encrypted, 'connected', 'backfill', c.status,
+       COALESCE(c.metadata, '{}'::jsonb), c.created_at, now()
+FROM channels c
+JOIN business_units b ON b.legacy_tenant_id = c.tenant_id
+WHERE c.kind IN ('linkedin','x','instagram','tiktok')
+ON CONFLICT DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS social_posts (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  business_unit_id BIGINT NOT NULL REFERENCES business_units(id) ON DELETE CASCADE,
+  website_id BIGINT REFERENCES websites(id) ON DELETE SET NULL,
+  content_item_id BIGINT NOT NULL REFERENCES content_items(id) ON DELETE CASCADE,
+  campaign_id BIGINT REFERENCES social_campaigns(id) ON DELETE SET NULL,
+  platform TEXT NOT NULL CHECK (platform IN ('linkedin','x','instagram','tiktok')),
+  body TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'draft'
+    CHECK (status IN ('draft','scheduled','publishing','posted','failed','cancelled')),
+  scheduled_at TIMESTAMPTZ,
+  published_at TIMESTAMPTZ,
+  external_id TEXT,
+  external_url TEXT,
+  error TEXT,
+  created_by_user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+  created_by_agent TEXT,
+  task_id BIGINT REFERENCES tasks(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- One active post per (item, platform): DB-enforced dedup. Cancelled rows
+-- free the slot (superseded scheduling is allowed); failed rows keep it —
+-- retry via reschedule of the same row, not a duplicate.
+CREATE UNIQUE INDEX IF NOT EXISTS social_posts_item_platform_active
+  ON social_posts (content_item_id, platform)
+  WHERE status <> 'cancelled';
+
+CREATE INDEX IF NOT EXISTS idx_social_posts_bu_status
+  ON social_posts (business_unit_id, status, scheduled_at);
+CREATE INDEX IF NOT EXISTS idx_social_posts_due
+  ON social_posts (scheduled_at) WHERE status = 'scheduled';
+
+CREATE TABLE IF NOT EXISTS social_post_metrics (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  social_post_id BIGINT NOT NULL REFERENCES social_posts(id) ON DELETE CASCADE,
+  captured_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  impressions BIGINT,
+  likes BIGINT,
+  comments BIGINT,
+  shares BIGINT,
+  clicks BIGINT,
+  raw JSONB NOT NULL DEFAULT '{}'::jsonb,
+  source TEXT NOT NULL DEFAULT 'manual' CHECK (source IN ('manual','provider','backfill'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_social_post_metrics_post
+  ON social_post_metrics (social_post_id, captured_at DESC);
+
+-- Publication ledger gains the social leg (additive): draft_id becomes
+-- nullable, social_post_id is the new attribution column. The UNIQUE
+-- idempotency_key contract (§88) is untouched.
+ALTER TABLE content_publications ALTER COLUMN draft_id DROP NOT NULL;
+ALTER TABLE content_publications ADD COLUMN IF NOT EXISTS social_post_id BIGINT;
+CREATE INDEX IF NOT EXISTS content_publications_social_post_idx
+  ON content_publications (social_post_id);
+
+-- Workflow #2 (§466): the social sweep — same engine machinery as Workflow
+-- #1, kind social_sweep. Cadence: every 5 minutes when the platform cron
+-- permits; the /api/agents/sweep route triggers with a 5-minute bucket
+-- idempotency key, and the /social surface can spawn the sweep on demand
+-- (durability via the task engine either way).
+INSERT INTO workflows (business_unit_id, slug, name, trigger_kind, trigger_config, task_kind, task_payload)
+SELECT NULL, 'scheduled_social_sweep', 'Scheduled social sweep', 'schedule',
+       '{"schedule": "every 5 minutes (cron-cadence bound)"}'::jsonb, 'social_sweep', '{}'::jsonb
+WHERE NOT EXISTS (SELECT 1 FROM workflows WHERE slug = 'scheduled_social_sweep' AND business_unit_id IS NULL);`;
+
+/**
+ * Phase 10 agent activation (same pattern as 033/035): the social_media row
+ * was seeded disabled at P2 (§6.2); its phase flips it on and gives it a
+ * versioned v1 prompt. The pipeline calls the AI gateway directly with
+ * purpose="social" attribution (same integration shape as the seo agent).
+ */
+const M_038_SOCIAL_AGENT = `
+UPDATE agents SET status = 'active', updated_at = now()
+WHERE slug = 'social_media' AND status = 'disabled';
+
+INSERT INTO agent_versions (agent_id, version, system_prompt, config, changelog)
+SELECT a.id, COALESCE(max(v.version), 0) + 1,
+       'You are the Social Media Agent. You receive a single approved content item (title, body, metadata) and a target platform (linkedin | x | instagram | tiktok). Produce ONE platform-native variant of the item: respect the platform character budget (linkedin ~1300, x 280, instagram ~2200, tiktok ~150), open with the strongest hook, and keep the BU voice. Never invent facts, quotes, numbers or links that are not in the item; hashtags only when they add retrieval value (instagram/tiktok) and at most 5. Output strict JSON: {"body": string, "notes": string} where notes lists any assumption you made. If the item cannot honestly be adapted to the platform (e.g. a legal notice to TikTok), set {"body": "", "notes": "incompatible"} and explain.',
+       '{"outputSchema":"social_variant_v1"}'::jsonb,
+       'Phase 10 (P9): social workforce v1 prompt'
+FROM agents a LEFT JOIN agent_versions v ON v.agent_id = a.id
+WHERE a.slug = 'social_media' GROUP BY a.id;`;
+
+/**
+ * Phase 10 flag + permission (same pattern as 022/026/028/030/034/036): the
+ * `social` flag is the platform-level kill switch for the social workforce
+ * (the social_sweep handler skips fail-closed when OFF); the `social.manage`
+ * permission gates the /social surface for owner and administrator roles.
+ */
+const M_039_SOCIAL_FLAG_PERMS = `
+INSERT INTO feature_flags (key, enabled, emergency, description)
+VALUES ('social', TRUE, FALSE,
+        'Social workforce: accounts, campaigns, scheduled posts, publishing sweep (OFF = social_sweep skips, no posts publish)')
+ON CONFLICT (key) DO NOTHING;
+
+INSERT INTO permissions (key) VALUES ('social.manage') ON CONFLICT (key) DO NOTHING;
+
+INSERT INTO role_permissions (role_id, permission_id)
+SELECT r.id, p.id FROM roles r
+JOIN permissions p ON p.key = 'social.manage'
+WHERE r.key IN ('owner','administrator')
+ON CONFLICT DO NOTHING;`;
+
 export const MIGRATIONS: MigrationDef[] = [
   { version: "000", name: "agentos_legacy_baseline", source: M_000_LEGACY_BASELINE },
   { version: "001", name: "schema_migrations", source: M_001_SCHEMA_MIGRATIONS },
@@ -1495,4 +1713,7 @@ export const MIGRATIONS: MigrationDef[] = [
   { version: "034", name: "content_flag_permissions", source: M_034_CONTENT_FLAG_PERMS },
   { version: "035", name: "seo_workforce", source: M_035_SEO_WORKFORCE },
   { version: "036", name: "seo_flag_permissions", source: M_036_SEO_FLAG_PERMS },
+  { version: "037", name: "social_workforce", source: M_037_SOCIAL_WORKFORCE },
+  { version: "038", name: "social_agent", source: M_038_SOCIAL_AGENT },
+  { version: "039", name: "social_flag_permissions", source: M_039_SOCIAL_FLAG_PERMS },
 ];

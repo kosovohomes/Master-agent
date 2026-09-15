@@ -61,12 +61,23 @@ async function handle(req: Request) {
     createdBy: "cron",
   });
 
+  // Phase 10: Workflow #2 — the social sweep, triggered with a 5-minute
+  // bucket idempotency (time semantics for scheduled_at; when the platform
+  // cron cadence is raised, social publishing precision follows for free).
+  const socialBucket = Math.floor(Date.now() / 300_000);
+  const socialTriggered = await triggerWorkflow("scheduled_social_sweep", {
+    triggerRef: `cron:${socialBucket}`,
+    idempotencyKey: `social-sweep:${socialBucket}`,
+    createdBy: "cron",
+  });
+
   let tickResult: Awaited<ReturnType<typeof tick>> | null = null;
   let knowledgeSpawned: Awaited<ReturnType<typeof spawnDueKnowledgeFetches>> | null = null;
   let researchSpawned: Awaited<ReturnType<typeof spawnDueResearchRuns>> | null = null;
-  if (triggered) {
+  if (triggered || socialTriggered) {
     tickResult = await tick({ workerId: "cron-sweep", batch: 20 });
-    await settleWorkflowRun(triggered.workflowRunId);
+    if (triggered) await settleWorkflowRun(triggered.workflowRunId);
+    if (socialTriggered) await settleWorkflowRun(socialTriggered.workflowRunId);
   }
 
   // Phase 5: scheduled knowledge refresh — spawn fetch tasks for due sources
@@ -85,7 +96,8 @@ async function handle(req: Request) {
     actorType: "system", actorLabel: "cron", action: "publishing.sweep", resource: "drafts",
     result: "success", requestId,
     metadata: {
-      mode: "engine", workflow: triggered ?? null, tick: tickResult as unknown as Record<string, unknown> | null,
+      mode: "engine", workflow: triggered ?? null, socialWorkflow: socialTriggered ?? null,
+      tick: tickResult as unknown as Record<string, unknown> | null,
       knowledgeSpawned: knowledgeSpawned as unknown as Record<string, unknown> | null,
       researchSpawned: researchSpawned as unknown as Record<string, unknown> | null,
     },
@@ -94,6 +106,7 @@ async function handle(req: Request) {
     data: {
       mode: "engine" as const,
       workflow: triggered,
+      socialWorkflow: socialTriggered,
       tick: tickResult,
       knowledgeSpawned,
       researchSpawned,

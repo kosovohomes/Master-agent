@@ -73,6 +73,10 @@ const files = [
   "tests/seo-pipeline-tests.ts",
   "tests/seo-service-tests.ts",
   "tests/seo-tasks-tests.ts",
+  // Phase 10 suites
+  "tests/social-service-tests.ts",
+  "tests/social-sweep-tests.ts",
+  "tests/social-oauth-tests.ts",
 ];
 let failures = 0;
 for (const f of files) {

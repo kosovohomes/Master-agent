@@ -20,6 +20,7 @@ export default async function DashboardLayout({ children }: { children: React.Re
     { href: "/research", label: "Research", show: perms.has("research.manage") || perms.has("audit.read") },
     { href: "/content", label: "Content", show: perms.has("content.manage") || perms.has("audit.read") },
     { href: "/seo", label: "SEO", show: perms.has("seo.manage") || perms.has("audit.read") },
+    { href: "/social", label: "Social", show: perms.has("social.manage") || perms.has("audit.read") },
     { href: "/websites", label: "Websites", show: perms.has("bu.manage") || perms.has("website.manage") || perms.has("drafts.read") },
     { href: "/approvals", label: "Approvals", show: perms.has("drafts.read") },
     { href: "/audit", label: "Audit", show: perms.has("audit.read") },
