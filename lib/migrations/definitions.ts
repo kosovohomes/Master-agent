@@ -1862,31 +1862,41 @@ CREATE TABLE IF NOT EXISTS inquiries (
 CREATE INDEX IF NOT EXISTS idx_inquiries_bu_status
   ON inquiries (business_unit_id, status, created_at DESC);
 
-CREATE TABLE IF NOT EXISTS leads (
-  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  business_unit_id BIGINT NOT NULL REFERENCES business_units(id) ON DELETE CASCADE,
-  inquiry_id BIGINT REFERENCES inquiries(id) ON DELETE SET NULL,
-  company TEXT,
-  contact_name TEXT,
-  contact_email TEXT,
-  contact_phone TEXT,
-  source TEXT NOT NULL DEFAULT 'widget' CHECK (source IN ('widget','manual','email','outreach')),
-  stage TEXT NOT NULL DEFAULT 'new'
-    CHECK (stage IN ('new','qualified','engaged','proposal','won','lost')),
-  lead_score INT NOT NULL DEFAULT 0 CHECK (lead_score >= 0 AND lead_score <= 100),
-  score_band TEXT NOT NULL DEFAULT 'cold' CHECK (score_band IN ('cold','warm','hot')),
-  next_action TEXT,
-  score_rationale TEXT,
-  scored_by TEXT CHECK (scored_by IN ('llm','deterministic')),
-  created_by_agent TEXT,
-  created_by_user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
-  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
+-- §55 leads extension (roadmap P11: leads extension + stage migration):
+-- the Phase-1 legacy leads table (tenant_id, company, name, contact, channel,
+-- stage legacy-states, source, notes — the dead-coded prospect path)
+-- is EXTENDED additively, never recreated: ADD COLUMN only, stage CHECK
+-- becomes a superset so legacy rows stay legal, and tenant_id loses its
+-- NOT NULL (relaxation — the bu-scoped workforce inserts carry
+-- business_unit_id instead). Legacy columns keep their meaning: the name
+-- column IS the contact name, contact/channel stay NOT NULL and are
+-- back-filled by the workforce writer on every insert.
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS business_unit_id BIGINT REFERENCES business_units(id) ON DELETE CASCADE;
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS inquiry_id BIGINT REFERENCES inquiries(id) ON DELETE SET NULL;
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS website_id BIGINT REFERENCES websites(id) ON DELETE SET NULL;
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS contact_email TEXT;
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS contact_phone TEXT;
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS lead_score INT NOT NULL DEFAULT 0 CHECK (lead_score >= 0 AND lead_score <= 100);
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS score_band TEXT NOT NULL DEFAULT 'cold' CHECK (score_band IN ('cold','warm','hot'));
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS next_action TEXT;
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS score_rationale TEXT;
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS scored_by TEXT CHECK (scored_by IN ('llm','deterministic'));
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS created_by_agent TEXT;
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS created_by_user_id BIGINT REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
+ALTER TABLE leads ALTER COLUMN tenant_id DROP NOT NULL;
+
+-- Stage migration: superset CHECK — legacy states ('contacted','responded',
+-- 'converted','dead') stay valid for legacy rows; the §55 funnel states are
+-- added. The workforce FSM (lib/sales/types LEAD_FLOW) only ever WRITES the
+-- §55 states; legacy rows are read-only history.
+ALTER TABLE leads DROP CONSTRAINT IF EXISTS leads_stage_check;
+ALTER TABLE leads ADD CHECK (stage IN ('new','contacted','responded','converted','dead','qualified','engaged','proposal','won','lost'));
 
 -- §55 dedup: one lead per (BU, email). Case-insensitive; NULL emails are
--- unconstrained (a lead may exist without an email — manual entry).
+-- unconstrained (a lead may exist without an email — manual entry or a
+-- legacy row).
 CREATE UNIQUE INDEX IF NOT EXISTS uq_leads_bu_email
   ON leads (business_unit_id, lower(contact_email))
   WHERE contact_email IS NOT NULL;
@@ -2026,8 +2036,10 @@ export const MIGRATIONS: MigrationDef[] = [
  *   inquiries      — structured inquiry records linked to conversations
  *                    (classification FSM: new → classified → escalated →
  *                    resolved/dismissed)
- *   leads          — the §55 contract: lead_score 0-100, band, next_action,
- *                    stage FSM (new → qualified → engaged → proposal →
- *                    won/lost); dedup = partial UNIQUE on (bu, lower(email))
- *                    with a score-ratchet upsert (never regress)
+ *   leads          — the legacy Phase-1 leads table EXTENDED additively
+ *                    (roadmap "leads extension + stage migration"): §55
+ *                    contract columns (lead_score 0-100, band, next_action)
+ *                    + stage superset CHECK (legacy states stay legal);
+ *                    dedup = partial UNIQUE on (bu, lower(email)) with a
+ *                    score-ratchet upsert (never regress)
  */

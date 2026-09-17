@@ -77,7 +77,7 @@ export interface InquiryRow {
 
 export interface LeadRow {
   id: number;
-  business_unit_id: number;
+  business_unit_id: number | null;
   inquiry_id: number | null;
   company: string | null;
   contact_name: string | null;
@@ -95,6 +95,18 @@ export interface LeadRow {
   metadata: Record<string, unknown>;
   created_at: string;
   updated_at: string;
+}
+
+/**
+ * The physical table is the EXTENDED legacy `leads` (Phase-1 baseline):
+ * `name` IS the contact name, `contact`/`channel` are NOT NULL legacy
+ * compatibility columns the writer back-fills, `tenant_id` is legacy.
+ * Map to the §55 shape and strip legacy internals from API responses.
+ */
+function toLead(r: Record<string, unknown>): LeadRow {
+  const { name, contact, channel, tenant_id, notes, ...rest } = r as Record<string, unknown>;
+  void contact; void channel; void tenant_id; void notes;
+  return { ...(rest as unknown as LeadRow), contact_name: (rest.contact_name as string | null) ?? (name as string | null) ?? null };
 }
 
 /* ------------------------------------------------------------------ */
@@ -341,10 +353,12 @@ export async function updateInquiryClassification(
 /* ------------------------------------------------------------------ */
 
 /**
- * Score-ratchet upsert (§55 + §91): same (bu, email) → update contact
- * fields; lead_score moves ONLY upward (GREATEST); band follows the
- * ratcheted score; stage is NEVER touched here (humans own stages);
- * inquiry linkage kept on first insert (first attribution wins).
+ * Score-ratchet upsert (§55 + §91) over the EXTENDED legacy table: same
+ * (bu, email) → update contact fields; lead_score moves ONLY upward
+ * (GREATEST); band follows the ratcheted score; stage is NEVER touched here
+ * (humans own stages); inquiry linkage kept on first insert (first
+ * attribution wins). Legacy NOT NULL columns are back-filled by the writer:
+ * contact = first non-empty of email/phone/name, channel = source.
  */
 export async function upsertLead(p: {
   businessUnitId: number;
@@ -364,16 +378,17 @@ export async function upsertLead(p: {
 }): Promise<{ lead: LeadRow; created: boolean }> {
   const score = clampScore(p.leadScore ?? 0);
   const band = bandFor(score);
-  const rows = await query<LeadRow & { inserted: boolean }>(
-    `INSERT INTO leads (business_unit_id, inquiry_id, company, contact_name, contact_email, contact_phone,
-                        source, lead_score, score_band, next_action, score_rationale, scored_by,
+  const rows = await query<Record<string, unknown>>(
+    `INSERT INTO leads (business_unit_id, inquiry_id, company, name, contact_email, contact_phone,
+                        contact, channel, source, stage, lead_score, score_band, next_action, score_rationale, scored_by,
                         created_by_agent, created_by_user_id, metadata)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::jsonb)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'new', $10, $11, $12, $13, $14, $15, $16, $17::jsonb)
      ON CONFLICT (business_unit_id, lower(contact_email)) WHERE contact_email IS NOT NULL
      DO UPDATE SET
        company = COALESCE(EXCLUDED.company, leads.company),
-       contact_name = COALESCE(EXCLUDED.contact_name, leads.contact_name),
+       name = COALESCE(EXCLUDED.name, leads.name),
        contact_phone = COALESCE(EXCLUDED.contact_phone, leads.contact_phone),
+       contact = COALESCE(EXCLUDED.contact, leads.contact),
        lead_score = GREATEST(leads.lead_score, EXCLUDED.lead_score),
        score_band = CASE WHEN EXCLUDED.lead_score > leads.lead_score THEN EXCLUDED.score_band ELSE leads.score_band END,
        next_action = COALESCE(EXCLUDED.next_action, leads.next_action),
@@ -389,6 +404,8 @@ export async function upsertLead(p: {
       p.contactName ?? null,
       p.contactEmail ?? null,
       p.contactPhone ?? null,
+      p.contactEmail ?? p.contactPhone ?? p.contactName ?? "unknown",
+      p.source ?? "widget",
       p.source ?? "widget",
       score,
       band,
@@ -400,17 +417,18 @@ export async function upsertLead(p: {
       JSON.stringify(p.metadata ?? {}),
     ]
   );
-  const { inserted, ...lead } = rows[0];
-  return { lead, created: inserted };
+  const raw0 = rows[0] as unknown as Record<string, unknown> & { inserted: boolean };
+  const created = raw0.inserted;
+  return { lead: toLead(raw0), created };
 }
 
 export async function getLead(id: number): Promise<LeadRow | null> {
-  const rows = await query<LeadRow>("SELECT * FROM leads WHERE id = $1", [id]);
-  return rows[0] ?? null;
+  const rows = await query<Record<string, unknown>>("SELECT * FROM leads WHERE id = $1", [id]);
+  return rows[0] ? toLead(rows[0]) : null;
 }
 
 export async function listLeads(buId: number, limit = 100): Promise<LeadRow[]> {
-  return query<LeadRow>(
+  const rows = await query<Record<string, unknown>>(
     `SELECT * FROM leads WHERE business_unit_id = $1
      ORDER BY
        CASE stage WHEN 'won' THEN 5 WHEN 'lost' THEN 4 ELSE 0 END ASC,
@@ -418,6 +436,7 @@ export async function listLeads(buId: number, limit = 100): Promise<LeadRow[]> {
      LIMIT $2`,
     [buId, limit]
   );
+  return rows.map(toLead);
 }
 
 /** Row-locked stage transition — HUMAN-ONLY doorway (routes are the only caller). */
@@ -433,7 +452,7 @@ export async function transitionLead(
     if (!canTransitionLead(from, to)) {
       throw new SalesServiceError("BAD_TRANSITION", 409, `lead ${id}: ${from} → ${to} is not a legal transition`);
     }
-    const rows = await q<LeadRow>(
+    const rows = await q<Record<string, unknown>>(
       `UPDATE leads SET
          stage = $2,
          next_action = COALESCE($3, next_action),
@@ -441,7 +460,7 @@ export async function transitionLead(
        WHERE id = $1 RETURNING *`,
       [id, to, opts.nextAction ?? null]
     );
-    return rows[0];
+    return toLead(rows[0]);
   });
 }
 
@@ -449,13 +468,13 @@ export async function updateLeadActions(
   id: number,
   patch: { nextAction?: string | null }
 ): Promise<LeadRow> {
-  const rows = await query<LeadRow>(
+  const rows = await query<Record<string, unknown>>(
     `UPDATE leads SET next_action = COALESCE($2, next_action), updated_at = now()
      WHERE id = $1 RETURNING *`,
     [id, patch.nextAction ?? null]
   );
   if (!rows[0]) throw new SalesServiceError("NOT_FOUND", 404, `lead ${id} not found`);
-  return rows[0];
+  return toLead(rows[0]);
 }
 
 /* ------------------------------------------------------------------ */
