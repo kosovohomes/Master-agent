@@ -79,11 +79,17 @@ async function main() {
     typeof shape.summary?.inquiries === "object" && typeof shape.summary?.leads === "object"
     && typeof shape.summary?.conversations?.total === "number" && typeof shape.summary?.hotLeads === "number", "");
 
+  // ---------- 2b. resolve the legacy tenantId from the demo site ----------
+  const wc = await fetch(`${BASE}/api/v1/widget/config?tenant=acme-homes`).then((r) => r.json()).catch(() => null) as any;
+  const TENANT_ID = Number(wc?.data?.tenantId ?? 0);
+  ok("legacy tenantId resolved from widget config", TENANT_ID > 0, `id=${TENANT_ID}`);
+  if (!TENANT_ID) process.exit(1);
+
   // ---------- 3. PUBLIC inquiry intake (deterministic under unfunded LLM) ----------
   const inqRes = await fetch(`${BASE}/api/v1/inquiries`, {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      tenantId: 1, name: "P12 Drill", email: LEAD_EMAIL,
+      tenantId: TENANT_ID, name: "P12 Drill", email: LEAD_EMAIL,
       subject: "Pricing", body: "We want a quote and pricing for your services — please send a proposal.",
       visitorId: `v-drill-${STAMP}`,
     }),
@@ -110,7 +116,7 @@ async function main() {
   // ---------- 4. high-urgency ESCALATION (§55 human loop) ----------
   const escRes = await fetch(`${BASE}/api/v1/inquiries`, {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ tenantId: 1, subject: "Urgent", body: "URGENT: this is an emergency, we need help immediately." }),
+    body: JSON.stringify({ tenantId: TENANT_ID, subject: "Urgent", body: "URGENT: this is an emergency, we need help immediately." }),
   });
   const escBody = (await escRes.json().catch(() => null)) as any ?? {};
   const escId = escBody?.data?.inquiryId ?? 0;
@@ -126,7 +132,7 @@ async function main() {
   const hpCount = (beforeHp.body?.data?.summary?.inquiries ?? {} as Record<string, number>);
   const hpRes = await fetch(`${BASE}/api/v1/inquiries`, {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ tenantId: 1, body: "bot spam", website: "http://spam.example" }),
+    body: JSON.stringify({ tenantId: TENANT_ID, body: "bot spam", website: "http://spam.example" }),
   });
   const hpBody = (await hpRes.json().catch(() => null)) as any ?? {};
   ok("honeypot POST silently discarded", hpRes.status === 200 && hpBody?.data?.inquiryId === null, `status=${hpRes.status} id=${hpBody?.data?.inquiryId}`);
@@ -138,7 +144,7 @@ async function main() {
   // ---------- 6. widget chat persistence under LLM outage (§65/§101) ----------
   const chatRes = await fetch(`${BASE}/api/v1/chat`, {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ tenantId: 1, question: `P12 persistence probe ${STAMP}`, visitorId: `v-chat-${STAMP}` }),
+    body: JSON.stringify({ tenantId: TENANT_ID, question: `P12 persistence probe ${STAMP}`, visitorId: `v-chat-${STAMP}` }),
   });
   ok("chat under unfunded LLM fails loudly (500 CHAT_FAILED)", chatRes.status === 500, `status=${chatRes.status}`);
   const convList = await api(auth, "/api/admin/sales/conversations");
@@ -155,12 +161,12 @@ async function main() {
   }
   const badKey = await fetch(`${BASE}/api/v1/chat`, {
     method: "POST", headers: { "Content-Type": "application/json", "x-agentos-site-key": `sk-invalid-${STAMP}` },
-    body: JSON.stringify({ tenantId: 1, question: "hi" }),
+    body: JSON.stringify({ tenantId: TENANT_ID, question: "hi" }),
   });
   ok("invalid site key → 401 INVALID_SITE_KEY", badKey.status === 401, `status=${badKey.status}`);
   const ghostConv = await fetch(`${BASE}/api/v1/chat`, {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ tenantId: 1, question: "hi", conversationId: 999999999 }),
+    body: JSON.stringify({ tenantId: TENANT_ID, question: "hi", conversationId: 999999999 }),
   });
   ok("unknown conversation → 404 CONVERSATION_NOT_FOUND", ghostConv.status === 404, `status=${ghostConv.status}`);
 
@@ -216,7 +222,7 @@ async function main() {
   ok("classify with flag OFF → 423 FLAG_DISABLED (fail-closed LLM leg)", cls.status === 423 && cls.body?.errors?.[0]?.code === "FLAG_DISABLED", `status=${cls.status}`);
   const pubDuringOff = await fetch(`${BASE}/api/v1/inquiries`, {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ tenantId: 1, body: "flag-off intake still works (deterministic)" }),
+    body: JSON.stringify({ tenantId: TENANT_ID, body: "flag-off intake still works (deterministic)" }),
   });
   ok("public intake still works with flag OFF (chat core untouched)", pubDuringOff.status === 200, `status=${pubDuringOff.status}`);
   const flagOn = await api(auth, "/api/admin/settings", {
