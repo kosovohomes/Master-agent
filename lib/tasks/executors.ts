@@ -29,6 +29,7 @@ import { registerResearchHandlers } from "../research/tasks";
 import { registerContentHandlers } from "../content/tasks";
 import { registerSeoHandlers } from "../seo/tasks";
 import { registerSocialHandlers } from "../social/tasks";
+import { registerMarketingHandlers } from "../marketing/tasks";
 import { dispatch, getTenantConfig } from "../agents/dispatch";
 import { routeAgent } from "../agents/core";
 import type { AgentGoal } from "../agents/types";
@@ -369,6 +370,11 @@ export function registerBuiltins(): void {
   // LLM leg inside the sweep; platform variants are generated at scheduling
   // time, where the gateway is invoked with purpose="social").
   registerSocialHandlers();
+  // Phase 11: marketing workforce — the sweep is deterministic machinery
+  // (no LLM leg inside the sweep; campaign briefs are generated on-demand
+  // via the /brief API, where the gateway is invoked with
+  // purpose="marketing").
+  registerMarketingHandlers();
 }
 
 // Test seam: override the LLM client used by the builtin agent_dispatch.

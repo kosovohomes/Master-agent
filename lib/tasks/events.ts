@@ -36,7 +36,10 @@ export type EventName =
   | "content.rejected"
   | "social.posted"
   | "social.failed"
-  | "social.sweep";
+  | "social.sweep"
+  | "marketing.campaign_completed"
+  | "marketing.campaign_activated"
+  | "marketing.sweep";
 
 /** v1 notification policy: which events page ops, and what the subject says. */
 const RULES: Record<EventName, { subject: (p: Record<string, unknown>) => string } | null> = {
@@ -86,6 +89,14 @@ const RULES: Record<EventName, { subject: (p: Record<string, unknown>) => string
     subject: (p) => `Social publish failed for post #${p.postId} (${p.platform})`,
   },
   "social.sweep": null,
+  // Phase 11: marketing workforce — campaign completion (auto on ends_at or
+  // human) is /marketing-screen traffic; the sweep summary is observable but
+  // silent. Neither pages ops in v1 (notification policy pass pending).
+  "marketing.campaign_completed": null,
+  // A human launch is the material approval event (§91) — same class as
+  // content.approved: visible on the /marketing screen, no page in v1.
+  "marketing.campaign_activated": null,
+  "marketing.sweep": null,
 };
 
 async function opsEmail(): Promise<string | null> {

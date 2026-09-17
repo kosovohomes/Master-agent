@@ -78,7 +78,7 @@ try {
       const seededRoles = await pool.query("SELECT count(*)::int AS n FROM roles WHERE is_active");
       check("empty-db: RBAC seed present (4 active roles)", seededRoles.rows[0].n === 4);
       const seededFlags = await pool.query("SELECT count(*)::int AS n FROM feature_flags");
-      check("empty-db: flags seed present (10 incl. ai_gateway + knowledge_v2 + connectors + research + content + seo + social)", seededFlags.rows[0].n === 10);
+      check("empty-db: flags seed present (11 incl. ai_gateway + knowledge_v2 + connectors + research + content + seo + social + marketing)", seededFlags.rows[0].n === 11);
       await pool.end();
 
       const lines2: string[] = [];

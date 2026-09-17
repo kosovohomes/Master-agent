@@ -1675,6 +1675,134 @@ JOIN permissions p ON p.key = 'social.manage'
 WHERE r.key IN ('owner','administrator')
 ON CONFLICT DO NOTHING;`;
 
+/**
+ * Phase 11 — marketing workforce tables (§11 P10, §220 row 10, §468).
+ *
+ * The marketing-level `campaigns` table (distinct from social_campaigns,
+ * which groups social_posts) + `audience_segments` (§220) +
+ * `campaign_metrics` (performance monitoring, §468). Strictly additive.
+ *
+ * Campaign FSM (§91 autonomy: drafts AUTO, campaigns APPROVAL):
+ *
+ *   draft ──activate──> active ⇄ paused
+ *     │                  │   │        │
+ *     │                  │   └─> completed (auto on ends_at, or human)
+ *     ↓                  ↓
+ *  cancelled <──────── cancelled (terminal)
+ *
+ *  - INTO 'active' (launch from draft, resume from paused) REQUIRES a human
+ *    approver identity — approved_by_user_id / approved_at are set by the
+ *    service; the API layer cannot pass without one (§91 APPROVAL).
+ *  - Brief generation (draft creation) is the AUTO leg: the LLM may create
+ *    drafts autonomously; they sit in 'draft' until a human activates.
+ *  - paused → active counts as a relaunch: approver recorded again.
+ */
+const M_040_MARKETING_WORKFORCE = `
+CREATE TABLE IF NOT EXISTS audience_segments (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  business_unit_id BIGINT NOT NULL REFERENCES business_units(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  description TEXT,
+  criteria JSONB NOT NULL DEFAULT '{}'::jsonb,
+  estimated_size BIGINT,
+  source TEXT NOT NULL DEFAULT 'manual' CHECK (source IN ('manual','derived')),
+  created_by_user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (business_unit_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS campaigns (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  business_unit_id BIGINT NOT NULL REFERENCES business_units(id) ON DELETE CASCADE,
+  website_id BIGINT REFERENCES websites(id) ON DELETE SET NULL,
+  audience_segment_id BIGINT REFERENCES audience_segments(id) ON DELETE SET NULL,
+  name TEXT NOT NULL,
+  objective TEXT,
+  status TEXT NOT NULL DEFAULT 'draft'
+    CHECK (status IN ('draft','active','paused','completed','cancelled')),
+  starts_at TIMESTAMPTZ,
+  ends_at TIMESTAMPTZ,
+  approved_by_user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+  approved_at TIMESTAMPTZ,
+  activated_at TIMESTAMPTZ,
+  completed_at TIMESTAMPTZ,
+  created_by_user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+  created_by_agent TEXT,
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (business_unit_id, name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_campaigns_bu_status
+  ON campaigns (business_unit_id, status, created_at DESC);
+-- Auto-complete sweep leg: active campaigns past their end date.
+CREATE INDEX IF NOT EXISTS idx_campaigns_active_ends
+  ON campaigns (ends_at) WHERE status = 'active';
+
+CREATE TABLE IF NOT EXISTS campaign_metrics (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  campaign_id BIGINT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  captured_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  impressions BIGINT,
+  clicks BIGINT,
+  conversions BIGINT,
+  spend_usd NUMERIC(12,2),
+  source TEXT NOT NULL DEFAULT 'manual' CHECK (source IN ('manual','provider','derived')),
+  raw JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+
+CREATE INDEX IF NOT EXISTS idx_campaign_metrics_campaign
+  ON campaign_metrics (campaign_id, captured_at DESC);
+
+-- Workflow #3 (§468): the marketing sweep — auto-completes active campaigns
+-- past their end date (time semantics, not cron pile), emits lifecycle
+-- events. Same engine machinery as Workflows #1/#2.
+INSERT INTO workflows (business_unit_id, slug, name, trigger_kind, trigger_config, task_kind, task_payload)
+SELECT NULL, 'scheduled_marketing_sweep', 'Scheduled marketing sweep', 'schedule',
+       '{"schedule": "every 5 minutes (cron-cadence bound)"}'::jsonb, 'marketing_sweep', '{}'::jsonb
+WHERE NOT EXISTS (SELECT 1 FROM workflows WHERE slug = 'scheduled_marketing_sweep' AND business_unit_id IS NULL);`;
+
+/**
+ * Phase 11 marketing agent v2 prompt (same versioned-prompt pattern as
+ * M_038). The `marketing` agent is a P2 SURVIVOR (active, bound executor,
+ * v1 = legacy keyword-router prompt); its phase adds the workforce v2
+ * prompt: structured campaign briefs. The pipeline loads the CURRENT
+ * version registry-first (loadMarketingPrompt), so the bound legacy
+ * executor keeps v1 semantics for dispatch() while the marketing pipeline
+ * consumes v2.
+ */
+const M_041_MARKETING_AGENT_PROMPT = `
+INSERT INTO agent_versions (agent_id, version, system_prompt, config, changelog)
+SELECT a.id, COALESCE(max(v.version), 0) + 1,
+       'You are the Marketing Agent. You receive a business unit profile (name, industry, voice) and optional evidence (recent content item titles, known audience segment names, connected channels). Produce ONE campaign brief. Never invent metrics, customer counts, quotes or claims that are not in the evidence. Output strict JSON: {"name": string (short campaign name), "objective": string (one sentence), "audienceSummary": string, "keyMessages": string[] (3-5, each grounded in the evidence or generic brand-safe), "channels": string[] (subset of blog|email|linkedin|x|instagram|tiktok, prefer channels with evidence), "startOffsetDays": number (0-30), "durationDays": number (7-90), "notes": string (assumptions made)}. If the evidence is too thin to produce an honest brief, output {"name": "", "objective": "", "audienceSummary": "", "keyMessages": [], "channels": [], "startOffsetDays": 0, "durationDays": 0, "notes": "insufficient evidence"}.',
+       '{"outputSchema":"marketing_brief_v1"}'::jsonb,
+       'Phase 11 (P10): marketing workforce v2 brief prompt'
+FROM agents a LEFT JOIN agent_versions v ON v.agent_id = a.id
+WHERE a.slug = 'marketing' GROUP BY a.id;`;
+
+/**
+ * Phase 11 flag + permission (same pattern as 036/039): the `marketing`
+ * flag is the platform-level kill switch for the marketing workforce (the
+ * marketing_sweep handler skips fail-closed when OFF; brief generation is
+ * gated at the API layer too); the `marketing.manage` permission gates the
+ * /marketing surface for owner and administrator roles.
+ */
+const M_042_MARKETING_FLAG_PERMS = `
+INSERT INTO feature_flags (key, enabled, emergency, description)
+VALUES ('marketing', TRUE, FALSE,
+        'Marketing workforce: campaigns, audience segments, brief generation, lifecycle sweep (OFF = marketing_sweep skips, brief generation 423s)')
+ON CONFLICT (key) DO NOTHING;
+
+INSERT INTO permissions (key) VALUES ('marketing.manage') ON CONFLICT (key) DO NOTHING;
+
+INSERT INTO role_permissions (role_id, permission_id)
+SELECT r.id, p.id FROM roles r
+JOIN permissions p ON p.key = 'marketing.manage'
+WHERE r.key IN ('owner','administrator')
+ON CONFLICT DO NOTHING;`;
+
 export const MIGRATIONS: MigrationDef[] = [
   { version: "000", name: "agentos_legacy_baseline", source: M_000_LEGACY_BASELINE },
   { version: "001", name: "schema_migrations", source: M_001_SCHEMA_MIGRATIONS },
@@ -1716,4 +1844,7 @@ export const MIGRATIONS: MigrationDef[] = [
   { version: "037", name: "social_workforce", source: M_037_SOCIAL_WORKFORCE },
   { version: "038", name: "social_agent", source: M_038_SOCIAL_AGENT },
   { version: "039", name: "social_flag_permissions", source: M_039_SOCIAL_FLAG_PERMS },
+  { version: "040", name: "marketing_workforce", source: M_040_MARKETING_WORKFORCE },
+  { version: "041", name: "marketing_agent_prompt", source: M_041_MARKETING_AGENT_PROMPT },
+  { version: "042", name: "marketing_flag_permissions", source: M_042_MARKETING_FLAG_PERMS },
 ];
