@@ -1803,6 +1803,165 @@ JOIN permissions p ON p.key = 'marketing.manage'
 WHERE r.key IN ('owner','administrator')
 ON CONFLICT DO NOTHING;`;
 
+const M_043_SALES_WORKFORCE = `
+-- §139 MVP use case #3 machinery: conversation persistence + inquiries + leads.
+CREATE TABLE IF NOT EXISTS conversations (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  business_unit_id BIGINT NOT NULL REFERENCES business_units(id) ON DELETE CASCADE,
+  website_id BIGINT REFERENCES websites(id) ON DELETE SET NULL,
+  visitor_id TEXT,
+  channel TEXT NOT NULL DEFAULT 'widget' CHECK (channel IN ('widget','email','manual')),
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','closed','escalated')),
+  customer_name TEXT,
+  customer_email TEXT,
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_conversations_bu_recent
+  ON conversations (business_unit_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_conversations_visitor
+  ON conversations (visitor_id) WHERE visitor_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS messages (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  conversation_id BIGINT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  role TEXT NOT NULL CHECK (role IN ('visitor','assistant')),
+  content TEXT NOT NULL,
+  citations JSONB NOT NULL DEFAULT '[]'::jsonb,
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_messages_conversation
+  ON messages (conversation_id, created_at ASC);
+
+CREATE TABLE IF NOT EXISTS inquiries (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  business_unit_id BIGINT NOT NULL REFERENCES business_units(id) ON DELETE CASCADE,
+  conversation_id BIGINT REFERENCES conversations(id) ON DELETE SET NULL,
+  website_id BIGINT REFERENCES websites(id) ON DELETE SET NULL,
+  name TEXT,
+  email TEXT,
+  subject TEXT,
+  body TEXT NOT NULL,
+  classification TEXT CHECK (classification IN ('sales','support','spam','general')),
+  urgency TEXT CHECK (urgency IN ('low','medium','high')),
+  status TEXT NOT NULL DEFAULT 'new'
+    CHECK (status IN ('new','classified','escalated','resolved','dismissed')),
+  source TEXT NOT NULL DEFAULT 'widget' CHECK (source IN ('widget','manual','email')),
+  summary TEXT,
+  classified_by TEXT CHECK (classified_by IN ('llm','deterministic','human')),
+  created_by_user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_inquiries_bu_status
+  ON inquiries (business_unit_id, status, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS leads (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  business_unit_id BIGINT NOT NULL REFERENCES business_units(id) ON DELETE CASCADE,
+  inquiry_id BIGINT REFERENCES inquiries(id) ON DELETE SET NULL,
+  company TEXT,
+  contact_name TEXT,
+  contact_email TEXT,
+  contact_phone TEXT,
+  source TEXT NOT NULL DEFAULT 'widget' CHECK (source IN ('widget','manual','email','outreach')),
+  stage TEXT NOT NULL DEFAULT 'new'
+    CHECK (stage IN ('new','qualified','engaged','proposal','won','lost')),
+  lead_score INT NOT NULL DEFAULT 0 CHECK (lead_score >= 0 AND lead_score <= 100),
+  score_band TEXT NOT NULL DEFAULT 'cold' CHECK (score_band IN ('cold','warm','hot')),
+  next_action TEXT,
+  score_rationale TEXT,
+  scored_by TEXT CHECK (scored_by IN ('llm','deterministic')),
+  created_by_agent TEXT,
+  created_by_user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- §55 dedup: one lead per (BU, email). Case-insensitive; NULL emails are
+-- unconstrained (a lead may exist without an email — manual entry).
+CREATE UNIQUE INDEX IF NOT EXISTS uq_leads_bu_email
+  ON leads (business_unit_id, lower(contact_email))
+  WHERE contact_email IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_leads_bu_stage
+  ON leads (business_unit_id, stage, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_leads_bu_band
+  ON leads (business_unit_id, score_band) WHERE stage NOT IN ('won','lost');`;
+
+/**
+ * Phase 12 registry agents (audit §83-84 split decision):
+ *   customer_inquiry — classifies inbound inquiries (§55 classification)
+ *   lead             — scores leads into the §55 contract fields
+ *   customer_support — the registry twin of the RAG-grounded chat answerer
+ *                      (customer_service bound survivor stays untouched;
+ *                      support answers keep flowing through chat.ts)
+ * All three are llm-executor agents whose v1 prompts the sales pipeline
+ * loads registry-first (loadSalesPrompt pattern) with code fallback.
+ */
+const M_044_SALES_AGENTS = `
+-- lead / customer_inquiry / customer_support already exist as DISABLED
+-- placeholder rows (registry seed, migration 012). Activation follows the
+-- M_038 pattern: status flip via UPDATE + a NEW version row (max+1) so a
+-- placeholder v1 prompt never leaks into the live workforce — the pipeline
+-- loads the CURRENT version (registry-first, code fallback).
+UPDATE agents SET status = 'active', executor_kind = 'llm', updated_at = now()
+WHERE slug IN ('lead', 'customer_inquiry', 'customer_support') AND status = 'disabled';
+
+INSERT INTO agent_versions (agent_id, version, system_prompt, config, changelog)
+SELECT a.id, COALESCE(max(v.version), 0) + 1,
+       'You are the Customer Inquiry Agent. You receive a customer inquiry (name, email, subject, body) and the recent conversation transcript. Classify it. Never invent facts. Output strict JSON: {"classification": "sales"|"support"|"spam"|"general", "urgency": "low"|"medium"|"high", "summary": string (one sentence), "isLead": boolean (true only when the inquiry expresses commercial interest in the brand''s products/services), "company": string|null, "contactName": string|null, "contactEmail": string|null, "notes": string (evidence actually present in the inquiry)}. Spam = link-stuffed, off-topic or abusive.',
+       '{"outputSchema":"inquiry_classification_v1"}'::jsonb,
+       'Phase 12 (P11): customer inquiry classification v1'
+FROM agents a LEFT JOIN agent_versions v ON v.agent_id = a.id
+WHERE a.slug = 'customer_inquiry' GROUP BY a.id;
+
+INSERT INTO agent_versions (agent_id, version, system_prompt, config, changelog)
+SELECT a.id, COALESCE(max(v.version), 0) + 1,
+       'You are the Lead Agent. You receive a lead record (company, contact name/email/phone, inquiry body, conversation highlights). Score the lead 0-100 for commercial readiness. Never invent facts — score ONLY what the record shows. Output strict JSON: {"leadScore": number 0-100, "band": "cold"|"warm"|"hot" (cold 0-39, warm 40-69, hot 70-100), "nextAction": string (one concrete next step for the sales team), "rationale": string (which record fields drove the score)}.',
+       '{"outputSchema":"lead_score_v1"}'::jsonb,
+       'Phase 12 (P11): lead scoring v1'
+FROM agents a LEFT JOIN agent_versions v ON v.agent_id = a.id
+WHERE a.slug = 'lead' GROUP BY a.id;
+
+INSERT INTO agent_versions (agent_id, version, system_prompt, config, changelog)
+SELECT a.id, COALESCE(max(v.version), 0) + 1,
+       'You are a customer-support assistant for a website. Answer ONLY from the retrieved passages provided. Never invent facts. If the passages do not answer the question, say so plainly and suggest contacting the brand.',
+       '{"outputSchema":null}'::jsonb,
+       'Phase 12 (P11): customer support registry twin v1'
+FROM agents a LEFT JOIN agent_versions v ON v.agent_id = a.id
+WHERE a.slug = 'customer_support' GROUP BY a.id;`;
+
+/**
+ * Phase 12 flag + permission (036/039/042 pattern):
+ *   `sales` flag — kill switch for the sales/customer workforce. OFF:
+ *     classification + scoring LLM legs skip (inquiries stay 'new';
+ *     /api/admin/sales/classify returns 423), while widget chat, conversation
+ *     persistence and manual human lead machinery keep working — the widget
+ *     core must never die with the workforce flag.
+ *   `sales.manage` — gates the /sales surface for owner + administrator.
+ */
+const M_045_SALES_FLAG_PERMS = `
+INSERT INTO feature_flags (key, enabled, emergency, description)
+VALUES ('sales', TRUE, FALSE,
+        'Sales + customer workforce: inquiry classification, lead scoring, escalation (OFF = LLM legs skip; chat + persistence unaffected)')
+ON CONFLICT (key) DO NOTHING;
+
+INSERT INTO permissions (key) VALUES ('sales.manage') ON CONFLICT (key) DO NOTHING;
+
+INSERT INTO role_permissions (role_id, permission_id)
+SELECT r.id, p.id FROM roles r
+JOIN permissions p ON p.key = 'sales.manage'
+WHERE r.key IN ('owner','administrator')
+ON CONFLICT DO NOTHING;`;
+
 export const MIGRATIONS: MigrationDef[] = [
   { version: "000", name: "agentos_legacy_baseline", source: M_000_LEGACY_BASELINE },
   { version: "001", name: "schema_migrations", source: M_001_SCHEMA_MIGRATIONS },
@@ -1847,4 +2006,28 @@ export const MIGRATIONS: MigrationDef[] = [
   { version: "040", name: "marketing_workforce", source: M_040_MARKETING_WORKFORCE },
   { version: "041", name: "marketing_agent_prompt", source: M_041_MARKETING_AGENT_PROMPT },
   { version: "042", name: "marketing_flag_permissions", source: M_042_MARKETING_FLAG_PERMS },
+  { version: "043", name: "sales_workforce", source: M_043_SALES_WORKFORCE },
+  { version: "044", name: "sales_agents", source: M_044_SALES_AGENTS },
+  { version: "045", name: "sales_flag_permissions", source: M_045_SALES_FLAG_PERMS },
 ];
+
+/**
+ * Phase 12 — Sales + customer workforce (roadmap P11, audit §909):
+ * MVP use case #3 — inquiry → classified, scored lead with human escalation.
+ *
+ * M_043 creates the four workforce tables:
+ *   conversations  — widget chat sessions (site-registered: website_id when
+ *                    the embed presents a site key; visitor_id is a
+ *                    client-generated random UUID — never a fingerprint,
+ *                    SEC-C3)
+ *   messages       — persisted chat turns (visitor/assistant ONLY; the
+ *                    system prompt is never persisted, §65: conversations
+ *                    never expose internal reasoning)
+ *   inquiries      — structured inquiry records linked to conversations
+ *                    (classification FSM: new → classified → escalated →
+ *                    resolved/dismissed)
+ *   leads          — the §55 contract: lead_score 0-100, band, next_action,
+ *                    stage FSM (new → qualified → engaged → proposal →
+ *                    won/lost); dedup = partial UNIQUE on (bu, lower(email))
+ *                    with a score-ratchet upsert (never regress)
+ */

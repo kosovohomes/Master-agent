@@ -39,7 +39,10 @@ export type EventName =
   | "social.sweep"
   | "marketing.campaign_completed"
   | "marketing.campaign_activated"
-  | "marketing.sweep";
+  | "marketing.sweep"
+  | "sales.inquiry_created"
+  | "sales.lead_scored"
+  | "sales.escalated";
 
 /** v1 notification policy: which events page ops, and what the subject says. */
 const RULES: Record<EventName, { subject: (p: Record<string, unknown>) => string } | null> = {
@@ -97,6 +100,15 @@ const RULES: Record<EventName, { subject: (p: Record<string, unknown>) => string
   // content.approved: visible on the /marketing screen, no page in v1.
   "marketing.campaign_activated": null,
   "marketing.sweep": null,
+  // Phase 12: sales + customer workforce — inquiry intake and lead scoring
+  // are /sales-screen traffic (silent in v1); an ESCALATION pages ops —
+  // that is the §55 "human escalation" contract: a hot lead or high-urgency
+  // inquiry must reach a human, not just a dashboard.
+  "sales.inquiry_created": null,
+  "sales.lead_scored": null,
+  "sales.escalated": {
+    subject: (p) => `Inquiry #${p.inquiryId} escalated (${p.reason}) — needs a human`,
+  },
 };
 
 async function opsEmail(): Promise<string | null> {

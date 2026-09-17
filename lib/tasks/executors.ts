@@ -30,6 +30,7 @@ import { registerContentHandlers } from "../content/tasks";
 import { registerSeoHandlers } from "../seo/tasks";
 import { registerSocialHandlers } from "../social/tasks";
 import { registerMarketingHandlers } from "../marketing/tasks";
+import { registerSalesHandlers } from "../sales/tasks";
 import { dispatch, getTenantConfig } from "../agents/dispatch";
 import { routeAgent } from "../agents/core";
 import type { AgentGoal } from "../agents/types";
@@ -375,6 +376,12 @@ export function registerBuiltins(): void {
   // via the /brief API, where the gateway is invoked with
   // purpose="marketing").
   registerMarketingHandlers();
+  // Phase 12: sales + customer workforce — `chat_answer` is the async
+  // pathway over the widget core (the public route calls handleChatAnswer
+  // synchronously); classification/scoring legs run on-demand via the
+  // classify API with gateway attribution purpose="sales". Not flag-gated:
+  // chat must survive a sales-flag kill switch.
+  registerSalesHandlers();
 }
 
 // Test seam: override the LLM client used by the builtin agent_dispatch.

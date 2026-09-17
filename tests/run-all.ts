@@ -81,6 +81,7 @@ const files = [
   "tests/social-oauth-tests.ts",
   // Phase 11 suite (marketing workforce)
   "tests/marketing-tests.ts",
+  "tests/sales-tests.ts",
 ];
 let failures = 0;
 for (const f of files) {

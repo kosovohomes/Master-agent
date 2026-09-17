@@ -80,9 +80,13 @@ try {
   check("widget is served from public/ (Next static asset, application/javascript)", existsSync(widgetPath) && src.length > 0);
 
   check("widget reads numeric data-tenant", src.includes('getAttribute("data-tenant")'));
-  check("widget POSTs tenantId: Number(tenant) to /api/v1/chat", src.includes("tenantId: Number(tenant)") && src.includes('"/api/v1/chat"'));
+  check("widget POSTs tenantId (numeric when present; siteKey-only embeds supported) to /api/v1/chat", src.includes("tenantId: tenant ? Number(tenant) : undefined") && src.includes('"/api/v1/chat"'));
   check("widget renders answer from j.data.answer", src.includes("j.data.answer"));
   check("widget renders sources from j.data.sources", src.includes("j.data.sources[0].title") && src.includes(".aos-src"));
+  check("widget round-trips conversationId (Phase 12 persistence)", src.includes("j.data.conversationId") && src.includes("conversationId: conversationId || undefined"));
+  check("widget sends a random visitorId (no fingerprinting, SEC-C3)", src.includes("visitorId") && src.includes("Math.random") && !src.includes("navigator.userAgent"));
+  check("widget posts follow-up inquiries to /api/v1/inquiries with honeypot", src.includes('"/api/v1/inquiries"') && src.includes("website: hp.value"));
+  check("widget honors data-site-key (website-registered connector #1)", src.includes('getAttribute("data-site-key")'));
   check("widget is CSP-safe (no eval/new Function/inline handlers)", !/\beval\s*\(|new\s+Function|onclick\s*=|onload\s*=|onerror\s*=|javascript:/i.test(src));
   check("widget contains no <script injection string", !src.includes("<script"));
   check("widget is self-contained (no imports, no external URLs)", !src.includes("import ") && !src.includes("https://") && !src.includes("http://"));

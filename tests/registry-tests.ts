@@ -60,9 +60,12 @@ try {
     agents.find((a) => a.slug === "seo")?.status === "active");
   check("Phase 10 social_media agent activated (migration 038)",
     agents.find((a) => a.slug === "social_media")?.status === "active");
-  check("remaining 7 future-workforce placeholders still disabled",
-    placeholders.filter((s) => !activated7.includes(s) && !activated8.includes(s) && s !== "seo" && s !== "social_media").every((s) => agents.find((a) => a.slug === s)?.status === "disabled"));
-  check("registry has 19 rows (4 active + 3 Phase 7 + 3 Phase 8 + 1 Phase 9 + 1 Phase 10 + 7 placeholders)", agents.length === 19, `n=${agents.length}`);
+  const activated12 = ["lead", "customer_inquiry", "customer_support"];
+  check("Phase 12 sales trio activated (migration 044)",
+    activated12.every((s) => agents.find((a) => a.slug === s)?.status === "active"));
+  check("remaining 4 future-workforce placeholders still disabled",
+    placeholders.filter((s) => !activated7.includes(s) && !activated8.includes(s) && s !== "seo" && s !== "social_media" && !activated12.includes(s)).every((s) => agents.find((a) => a.slug === s)?.status === "disabled"));
+  check("registry has 19 rows (4 active + 3 Phase 7 + 3 Phase 8 + 1 Phase 9 + 1 Phase 10 + 3 Phase 12 + 4 placeholders)", agents.length === 19, `n=${agents.length}`);
 
   // golden prompts: version 1 of each survivor matches the legacy role line
   const golden: Record<string, string> = {
