@@ -190,11 +190,11 @@ check("lead: NULL-email rows both created", noEmail1.created && noEmail2.created
 
 /* ---------------- LLM legs (stub) + degradation ---------------- */
 type Msg = { role: string; content: string };
-function stubLlm(payload: unknown, opts: { broken?: boolean } = {}): LLMClient {
+function stubLlm(payload: unknown, opts: { broken?: boolean; raw?: boolean } = {}): LLMClient {
   return {
     async complete(_messages: Msg[]) {
       if (opts.broken) throw new Error("gateway down");
-      return JSON.stringify(payload);
+      return opts.raw ? String(payload) : JSON.stringify(payload);
     },
     async completeWithUsage(messages: Msg[]) {
       return { content: await (this as { complete: (m: Msg[]) => Promise<string> }).complete(messages), usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } };
@@ -265,7 +265,7 @@ await expectError("proc: terminal inquiry refuses", () => processInquiry(reclass
 registerSalesHandlers();
 check("tasks: chat_answer registered", typeof getTaskHandler("chat_answer") === "function");
 
-const chatLlm: LLMClient = stubLlm("Plain answer text");
+const chatLlm: LLMClient = stubLlm("Plain answer text", { raw: true });
 const chat = await handleChatAnswer(
   { tenantId: -1, question: "what areas do you serve?", businessUnitId: buA, visitorId: "v-chat-1" },
   { llm: chatLlm, retrieve: async () => [{ chunkId: 1, documentId: 1, title: "Areas", content: "All of Kosovo." }] }
