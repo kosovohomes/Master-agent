@@ -210,12 +210,17 @@ const goodCls = await classifyInquiryWithLLM(
   { inquiryId: inq.id, name: "Rana", email: null, subject: null, body: "quote please", transcript: [] }
 );
 check("llm: classification honored", goodCls.classification === "sales" && goodCls.isLead === true && goodCls.degraded === false && goodCls.company === "Acme");
-const junkCls = await classifyInquiryWithLLM(
-  stubLlm({ classification: "SPACE-STAR", urgency: "MAXIMUM" }),
-  { version: 1, systemPrompt: INQUIRY_DEFAULT_PROMPT },
-  { inquiryId: inq.id, name: null, email: null, subject: null, body: "hello", transcript: [] }
-);
-check("llm: out-of-enum clamped to safe defaults", junkCls.classification === "general" && junkCls.urgency === "low" && junkCls.degraded === false);
+let junkRejected = false;
+try {
+  await classifyInquiryWithLLM(
+    stubLlm({ classification: "SPACE-STAR", urgency: "MAXIMUM" }),
+    { version: 1, systemPrompt: INQUIRY_DEFAULT_PROMPT },
+    { inquiryId: inq.id, name: null, email: null, subject: null, body: "hello", transcript: [] }
+  );
+} catch {
+  junkRejected = true;
+}
+check("llm: schema-invalid payload rejected at the structured-output layer (processInquiry degrades on catch)", junkRejected);
 const goodScore = await scoreLeadWithLLM(
   stubLlm({ leadScore: 85, band: "hot", nextAction: "Sign them up", rationale: "budget stated" }),
   { version: 1, systemPrompt: LEAD_DEFAULT_PROMPT },
