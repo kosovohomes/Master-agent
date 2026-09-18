@@ -320,13 +320,14 @@ export async function listRecommendations(
 ): Promise<RecommendationRecord[]> {
   const lim = Math.max(1, Math.min(100, opts.limit ?? 25));
   const statusClause = opts.status ? " AND status = $2" : "";
+  const limitIdx = opts.status ? 3 : 2;
   // §99: scope-limited callers see ONLY their own BUs — never platform rows.
   if (scope.kind === "list") {
     if (scope.businessUnitIds.length === 0) return [];
     const rows = await query<RecRow>(
       `SELECT * FROM strategy_recommendations WHERE business_unit_id = ANY($1::int[])${statusClause}
        ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, created_at DESC
-       LIMIT $3`,
+       LIMIT $${limitIdx}`,
       [scope.businessUnitIds, ...(opts.status ? [opts.status] : []), lim]
     );
     return rows.map(toRecommendation);
