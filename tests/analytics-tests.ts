@@ -83,6 +83,7 @@ async function expectThrow(name: string, p: () => Promise<unknown>, messagePart:
 const stamp = Date.now();
 const OWNER: AnalyticsScope = { kind: "all", businessUnitIds: [] };
 let reportIds: number[] = [];
+let floorReportId = 0;
 let spawnedTaskIds: number[] = [];
 let testScheduleIds: number[] = [];
 const manualHashes: string[] = [];
@@ -281,7 +282,7 @@ const wide = { start: new Date(Date.now() - 86_400_000), end: new Date(Date.now(
   const key = `t-${stamp}-floor`;
   const { report } = await createReport({ businessUnitId: null, periodKind: "on_demand", periodKey: key, title: `Floor ${key}` });
   reportIds.push(report.id);
-  const floorReportId = report.id;
+  floorReportId = report.id;
   const stubNoop = stubLlm({});
   const res = await processReport(report.id, { llm: stubNoop, allowLlm: false });
   check("floor: report lands ready", res.status === "ready");
