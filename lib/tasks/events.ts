@@ -42,7 +42,10 @@ export type EventName =
   | "marketing.sweep"
   | "sales.inquiry_created"
   | "sales.lead_scored"
-  | "sales.escalated";
+  | "sales.escalated"
+  | "analytics.report_ready"
+  | "analytics.report_failed"
+  | "analytics.recommendation";
 
 /** v1 notification policy: which events page ops, and what the subject says. */
 const RULES: Record<EventName, { subject: (p: Record<string, unknown>) => string } | null> = {
@@ -109,6 +112,14 @@ const RULES: Record<EventName, { subject: (p: Record<string, unknown>) => string
   "sales.escalated": {
     subject: (p) => `Inquiry #${p.inquiryId} escalated (${p.reason}) — needs a human`,
   },
+  // Phase 13: analytics + strategy workforce — a READY digest is
+  // /analytics-screen traffic (the owner reads it there; no page in v1);
+  // a FAILED run is bus-visible but the task.failed machinery already
+  // pages ops on terminal failure (no double-page); recommendations land
+  // on the same screen (seo.recommendation policy, mirrored).
+  "analytics.report_ready": null,
+  "analytics.report_failed": null,
+  "analytics.recommendation": null,
 };
 
 async function opsEmail(): Promise<string | null> {

@@ -1972,6 +1972,181 @@ JOIN permissions p ON p.key = 'sales.manage'
 WHERE r.key IN ('owner','administrator')
 ON CONFLICT DO NOTHING;`;
 
+/**
+ * Phase 13 — Analytics + Strategy workforce (roadmap P12, §99/§102/§103).
+ *
+ * M_046 creates the three analytics tables:
+ *   reports                   — owner-level digests. business_unit_id NULL =
+ *                               PLATFORM-WIDE report (the §99 owner-level
+ *                               cross-BU artifact); a non-null value is a
+ *                               per-BU report. Payload carries COUNTS AND
+ *                               SUMS ONLY — never customer rows, names or
+ *                               emails (aggregate-only across BUs, §99).
+ *                               Dedup = expression UNIQUE
+ *                               (COALESCE(bu,0), period_kind, period_key):
+ *                               one report per scope+period, and the cron
+ *                               never double-writes a digest.
+ *   report_schedules          — cadence templates (daily/weekly/monthly,
+ *                               §102–§103); three PLATFORM schedules seeded
+ *                               here (bu NULL). spawnDueReportRuns() turns
+ *                               due schedules into period-idempotent
+ *                               report_run tasks (research_schedules
+ *                               pattern).
+ *   strategy_recommendations  — the recommendations store. SEO owns
+ *                               `seo_recommendations`; this is the STRATEGY
+ *                               domain: rules + strategy agent produce
+ *                               advice WITH the aggregate evidence that
+ *                               justifies it, owner accepts/dismisses
+ *                               (immutable review stamp). Name is
+ *                               deliberately NOT `recommendations` (collision
+ *                               hygiene with the SEO domain).
+ */
+const M_046_ANALYTICS_WORKFORCE = `
+CREATE TABLE IF NOT EXISTS reports (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  business_unit_id BIGINT REFERENCES business_units(id) ON DELETE CASCADE,
+  period_kind TEXT NOT NULL CHECK (period_kind IN ('daily','weekly','monthly','on_demand')),
+  period_key TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','ready','failed')),
+  title TEXT NOT NULL,
+  summary TEXT,
+  payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+  narrative JSONB,
+  generated_by TEXT CHECK (generated_by IN ('deterministic','llm')),
+  degraded BOOLEAN NOT NULL DEFAULT TRUE,
+  task_id BIGINT REFERENCES tasks(id) ON DELETE SET NULL,
+  prompt_version INT,
+  prompt_hash TEXT,
+  created_by_user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- NULL (platform) scope must dedup too: COALESCE collapses NULL to 0.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_reports_scope_period
+  ON reports (COALESCE(business_unit_id, 0), period_kind, period_key);
+CREATE INDEX IF NOT EXISTS idx_reports_recent
+  ON reports (COALESCE(business_unit_id, 0), created_at DESC);
+
+CREATE TABLE IF NOT EXISTS report_schedules (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  business_unit_id BIGINT REFERENCES business_units(id) ON DELETE CASCADE,
+  cadence TEXT NOT NULL CHECK (cadence IN ('daily','weekly','monthly')),
+  enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  last_run_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- §102–§103: the three owner-level digests exist from day one (daily /
+-- weekly / monthly). Per-BU schedules may be added later (bu NOT NULL).
+INSERT INTO report_schedules (business_unit_id, cadence)
+SELECT NULL, c.cadence
+FROM (VALUES ('daily'), ('weekly'), ('monthly')) AS c(cadence)
+WHERE NOT EXISTS (
+  SELECT 1 FROM report_schedules
+  WHERE business_unit_id IS NULL AND cadence = c.cadence
+);
+
+CREATE INDEX IF NOT EXISTS idx_report_schedules_due
+  ON report_schedules (enabled, cadence);
+
+CREATE TABLE IF NOT EXISTS strategy_recommendations (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  business_unit_id BIGINT REFERENCES business_units(id) ON DELETE CASCADE,
+  source TEXT NOT NULL DEFAULT 'report' CHECK (source IN ('report','analytics','strategy','manual')),
+  report_id BIGINT REFERENCES reports(id) ON DELETE SET NULL,
+  kind TEXT NOT NULL DEFAULT 'growth'
+    CHECK (kind IN ('growth','efficiency','risk','content','budget')),
+  priority TEXT NOT NULL DEFAULT 'medium' CHECK (priority IN ('low','medium','high')),
+  title TEXT NOT NULL,
+  detail TEXT NOT NULL,
+  evidence JSONB NOT NULL DEFAULT '[]'::jsonb,
+  status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','accepted','dismissed')),
+  dedup_hash TEXT NOT NULL,
+  agent_slug TEXT NOT NULL DEFAULT 'strategy',
+  task_id BIGINT REFERENCES tasks(id) ON DELETE SET NULL,
+  prompt_version INT,
+  prompt_hash TEXT,
+  reviewed_by TEXT,
+  reviewed_at TIMESTAMPTZ,
+  created_by_user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_strategy_recommendations_scope_hash
+  ON strategy_recommendations (COALESCE(business_unit_id, 0), dedup_hash);
+CREATE INDEX IF NOT EXISTS idx_strategy_recommendations_status
+  ON strategy_recommendations (COALESCE(business_unit_id, 0), status, created_at DESC);`;
+
+/**
+ * Phase 13 registry agents (M_044 pattern): the three migration-012
+ * placeholders go active. Each owns ONE structured leg of a report run:
+ *   analytics  — anomaly/inflection scan over the aggregate payload
+ *                (insights)          → outputSchema analytics_insights_v1
+ *   reporting  — the executive digest (summary/highlights/risks)
+ *                                     → outputSchema report_digest_v1
+ *   strategy   — evidence-cited recommendations
+ *                                     → outputSchema strategy_recommendations_v1
+ * All three load registry-first with code fallback (loadAgentPrompt
+ * pattern); all three degrade independently — a report is NEVER left
+ * unready because one leg failed (the deterministic floor covers every leg).
+ */
+const M_047_ANALYTICS_AGENTS = `
+UPDATE agents SET status = 'active', executor_kind = 'llm', updated_at = now()
+WHERE slug IN ('analytics', 'strategy', 'reporting') AND status = 'disabled';
+
+INSERT INTO agent_versions (agent_id, version, system_prompt, config, changelog)
+SELECT a.id, COALESCE(max(v.version), 0) + 1,
+       'You are the Analytics Agent. You receive an AGGREGATE metrics payload (counts, sums and rates only — no personal data). Identify performance patterns and anomalies (spikes, drops, zero-activity on a metric that should move). Never invent numbers: every observation must be derivable from the payload. Output strict JSON: {"insights": [{"metric": string (the payload key), "direction": "up"|"down"|"flat"|"anomaly", "observation": string (one sentence, cites the actual numbers)}]} with at most 6 insights.',
+       '{"outputSchema":"analytics_insights_v1"}'::jsonb,
+       'Phase 13 (P12): aggregate insights v1'
+FROM agents a LEFT JOIN agent_versions v ON v.agent_id = a.id
+WHERE a.slug = 'analytics' GROUP BY a.id;
+
+INSERT INTO agent_versions (agent_id, version, system_prompt, config, changelog)
+SELECT a.id, COALESCE(max(v.version), 0) + 1,
+       'You are the Reporting Agent. You receive an AGGREGATE metrics payload and the analytics insights for the period. Write the executive digest. Never invent numbers or events not present in the payload. Output strict JSON: {"summary": string (at most 3 sentences), "highlights": string[] (at most 5 one-sentence wins, grounded in the payload), "risks": string[] (at most 5 one-sentence concerns, grounded in the payload)}.',
+       '{"outputSchema":"report_digest_v1"}'::jsonb,
+       'Phase 13 (P12): owner digest v1'
+FROM agents a LEFT JOIN agent_versions v ON v.agent_id = a.id
+WHERE a.slug = 'reporting' GROUP BY a.id;
+
+INSERT INTO agent_versions (agent_id, version, system_prompt, config, changelog)
+SELECT a.id, COALESCE(max(v.version), 0) + 1,
+       'You are the Strategy Agent. You receive an AGGREGATE metrics payload (plus optional insights). Propose at most 5 concrete, evidence-cited recommendations for the owner. Never invent data — every recommendation must cite the aggregate evidence it is based on. Output strict JSON: {"recommendations": [{"kind": "growth"|"efficiency"|"risk"|"content"|"budget", "priority": "low"|"medium"|"high", "title": string (one line), "detail": string (what to do and why, grounded in the payload), "evidence": string[] (the actual payload figures that justify it)}]}.',
+       '{"outputSchema":"strategy_recommendations_v1"}'::jsonb,
+       'Phase 13 (P12): strategy recommendations v1'
+FROM agents a LEFT JOIN agent_versions v ON v.agent_id = a.id
+WHERE a.slug = 'strategy' GROUP BY a.id;`;
+
+/**
+ * Phase 13 flag + permission (036/039/042/045 pattern):
+ *   `analytics` flag — kill switch for the analytics/strategy workforce.
+ *     OFF: scheduled report runs SKIP (background handlers fail closed),
+ *     on-demand generation returns 423, while the aggregate DASHBOARD
+ *     keeps reading (the screen must never die with the workforce flag —
+ *     reads are guarded by permissions, not the flag).
+ *   `analytics.manage` — gates mutations + the /analytics surface for
+ *     owner + administrator.
+ */
+const M_048_ANALYTICS_FLAG_PERMS = `
+INSERT INTO feature_flags (key, enabled, emergency, description)
+VALUES ('analytics', TRUE, FALSE,
+        'Analytics + strategy workforce: cross-BU aggregate dashboards, scheduled reports (daily/weekly/monthly), strategy recommendations (OFF = scheduled runs skip; on-demand 423; dashboard reads unaffected)')
+ON CONFLICT (key) DO NOTHING;
+
+INSERT INTO permissions (key) VALUES ('analytics.manage') ON CONFLICT (key) DO NOTHING;
+
+INSERT INTO role_permissions (role_id, permission_id)
+SELECT r.id, p.id FROM roles r
+JOIN permissions p ON p.key = 'analytics.manage'
+WHERE r.key IN ('owner','administrator')
+ON CONFLICT DO NOTHING;`;
+
 export const MIGRATIONS: MigrationDef[] = [
   { version: "000", name: "agentos_legacy_baseline", source: M_000_LEGACY_BASELINE },
   { version: "001", name: "schema_migrations", source: M_001_SCHEMA_MIGRATIONS },
@@ -2019,6 +2194,9 @@ export const MIGRATIONS: MigrationDef[] = [
   { version: "043", name: "sales_workforce", source: M_043_SALES_WORKFORCE },
   { version: "044", name: "sales_agents", source: M_044_SALES_AGENTS },
   { version: "045", name: "sales_flag_permissions", source: M_045_SALES_FLAG_PERMS },
+  { version: "046", name: "analytics_workforce", source: M_046_ANALYTICS_WORKFORCE },
+  { version: "047", name: "analytics_agents", source: M_047_ANALYTICS_AGENTS },
+  { version: "048", name: "analytics_flag_permissions", source: M_048_ANALYTICS_FLAG_PERMS },
 ];
 
 /**

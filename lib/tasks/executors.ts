@@ -31,6 +31,7 @@ import { registerSeoHandlers } from "../seo/tasks";
 import { registerSocialHandlers } from "../social/tasks";
 import { registerMarketingHandlers } from "../marketing/tasks";
 import { registerSalesHandlers } from "../sales/tasks";
+import { registerAnalyticsHandlers } from "../analytics/tasks";
 import { dispatch, getTenantConfig } from "../agents/dispatch";
 import { routeAgent } from "../agents/core";
 import type { AgentGoal } from "../agents/types";
@@ -382,6 +383,22 @@ export function registerBuiltins(): void {
   // classify API with gateway attribution purpose="sales". Not flag-gated:
   // chat must survive a sales-flag kill switch.
   registerSalesHandlers();
+  // Phase 13: analytics + strategy workforce — `report_run` is the
+  // scheduled digest pathway (cron-spawned, period-idempotent). The three
+  // structured legs ride the gateway with per-task attribution
+  // (purpose="analytics"|"reporting"|"strategy") so budget ceilings and
+  // the llm_requests ledger cover the workforce like every other phase.
+  registerAnalyticsHandlers((task: { business_unit_id: number | null; id: number }) => {
+    const gateway = builtinLlm as LLMClient & Partial<GatewayClient>;
+    if (typeof gateway.withAttribution === "function") {
+      return gateway.withAttribution({
+        businessUnitId: task.business_unit_id ?? undefined,
+        taskId: task.id,
+        purpose: "reporting",
+      });
+    }
+    return builtinLlm;
+  });
 }
 
 // Test seam: override the LLM client used by the builtin agent_dispatch.

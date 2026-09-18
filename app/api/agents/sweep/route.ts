@@ -7,6 +7,7 @@ import { writeAudit, requestIdFor } from "@/lib/audit";
 import { tick, triggerWorkflow, settleWorkflowRun } from "@/lib/tasks/engine";
 import { spawnDueKnowledgeFetches } from "@/lib/knowledge/service";
 import { spawnDueResearchRuns } from "@/lib/research/service";
+import { spawnDueReportRuns } from "@/lib/analytics/service";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -74,6 +75,8 @@ async function handle(req: Request) {
   let tickResult: Awaited<ReturnType<typeof tick>> | null = null;
   let knowledgeSpawned: Awaited<ReturnType<typeof spawnDueKnowledgeFetches>> | null = null;
   let researchSpawned: Awaited<ReturnType<typeof spawnDueResearchRuns>> | null = null;
+  let reportsSpawned: Awaited<ReturnType<typeof spawnDueReportRuns>> | null = null;
+  let reportTick: Awaited<ReturnType<typeof tick>> | null = null;
   if (triggered || socialTriggered) {
     tickResult = await tick({ workerId: "cron-sweep", batch: 20 });
     if (triggered) await settleWorkflowRun(triggered.workflowRunId);
@@ -92,6 +95,17 @@ async function handle(req: Request) {
     researchSpawned = await spawnDueResearchRuns().catch(() => null);
   }
 
+  // Phase 13: scheduled digests (§102–§103) — due report_schedules spawn
+  // report_run tasks (period-idempotent). Spawned tasks are ticked HERE so a
+  // digest never waits a full cron day in the queue; the flag is the kill
+  // switch (OFF = no spawn, pending rows stay pending).
+  if (await isFlagEnabled("analytics", false)) {
+    reportsSpawned = await spawnDueReportRuns().catch(() => null);
+    if (reportsSpawned && reportsSpawned.spawned > 0) {
+      reportTick = await tick({ workerId: "cron-reports", batch: 5 }).catch(() => null);
+    }
+  }
+
   await writeAudit({
     actorType: "system", actorLabel: "cron", action: "publishing.sweep", resource: "drafts",
     result: "success", requestId,
@@ -100,6 +114,8 @@ async function handle(req: Request) {
       tick: tickResult as unknown as Record<string, unknown> | null,
       knowledgeSpawned: knowledgeSpawned as unknown as Record<string, unknown> | null,
       researchSpawned: researchSpawned as unknown as Record<string, unknown> | null,
+      reportsSpawned: reportsSpawned as unknown as Record<string, unknown> | null,
+      reportTick: reportTick as unknown as Record<string, unknown> | null,
     },
   });
   return NextResponse.json({
@@ -110,6 +126,8 @@ async function handle(req: Request) {
       tick: tickResult,
       knowledgeSpawned,
       researchSpawned,
+      reportsSpawned,
+      reportTick,
     },
     meta: { requestId },
   });
