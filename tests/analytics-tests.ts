@@ -281,6 +281,7 @@ const wide = { start: new Date(Date.now() - 86_400_000), end: new Date(Date.now(
   const key = `t-${stamp}-floor`;
   const { report } = await createReport({ businessUnitId: null, periodKind: "on_demand", periodKey: key, title: `Floor ${key}` });
   reportIds.push(report.id);
+  const floorReportId = report.id;
   const stubNoop = stubLlm({});
   const res = await processReport(report.id, { llm: stubNoop, allowLlm: false });
   check("floor: report lands ready", res.status === "ready");
@@ -342,7 +343,16 @@ const wide = { start: new Date(Date.now() - 86_400_000), end: new Date(Date.now(
     `SELECT count(*)::int AS n FROM strategy_recommendations WHERE report_id = $1 AND source = 'report'`,
     [report.id]
   ))[0].n;
-  check("llm: strategy recs capped at 5 per leg (7 offered, clamped)", recCount <= 5 + 2, `n=${recCount}`); // +2 tolerance for deterministic rules that also fired
+  // LLM-leg contribution is EXACT: 7 offered, clamped to 5 (titles carry the
+  // stamp; the 600-char title stores clamped-to-200). Deterministic rules add
+  // their own evidence-cited recs on top (monotone in a shared CI DB).
+  const llmRecs = (await query<{ n: number }>(
+    `SELECT count(*)::int AS n FROM strategy_recommendations
+     WHERE report_id = $1 AND source = 'report' AND (title LIKE $2 OR title = $3)`,
+    [report.id, `%${stamp}%`, "T".repeat(200)]
+  ))[0].n;
+  check("llm: strategy leg contributed exactly 5 (7 offered, clamped)", llmRecs === 5, `llm=${llmRecs} total=${recCount}`);
+  check("llm: deterministic recs coexist with llm recs", recCount >= llmRecs + 1, `total=${recCount}`);
 }
 
 /* ------------------------------------------------------------------ */
@@ -533,8 +543,7 @@ const wide = { start: new Date(Date.now() - 86_400_000), end: new Date(Date.now(
 {
   await expectError("errors: processReport on missing report", () => processReport(999999999, { llm: stubLlm({}), allowLlm: false }), "NOT_FOUND");
 
-  const ready = await getReport(reportIds[0]);
-  await expectError("errors: processReport on ready report", () => processReport(ready?.id ?? 0, { llm: stubLlm({}), allowLlm: false }), "BAD_STATE");
+  await expectError("errors: processReport on ready report", () => processReport(floorReportId, { llm: stubLlm({}), allowLlm: false }), "BAD_STATE");
 
   // Deterministic unit legs on a crafted payload (budget rule)
   const win = windowFor("on_demand", "unit", 7);
