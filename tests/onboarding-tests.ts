@@ -159,9 +159,10 @@ try {
   check("connector: widget site key stored in config", widgetRow?.config?.siteKey === d!.siteKey);
 
   const grants = await query<{ capability: string }>(
-    `SELECT capability FROM website_capabilities WHERE website_id = $1 AND enabled = true ORDER BY capability`, [d!.websiteId]);
-  const grantSet = grants.map((g) => g.capability).join(",");
-  check("§12: grants live (chat.answer, CREATE_LEAD, READ_CONTENT)", grantSet === "CREATE_LEAD,READ_CONTENT,chat.answer", grantSet);
+    `SELECT capability FROM website_capabilities WHERE website_id = $1 AND enabled = true`, [d!.websiteId]);
+  // collation-independent comparison (CI PG16 vs local PG17 sort differently)
+  const grantSet = grants.map((g) => g.capability).sort().join(",");
+  check("§12: grants live (chat.answer, CREATE_LEAD, READ_CONTENT)", grantSet === "CREATE_LEAD,READ_CONTENT,chat.answer".split(",").sort().join(","), grantSet);
 
   const knowledgeRow = (await query<{ id: number }>(
     `SELECT id FROM knowledge_sources WHERE website_id = $1 AND kind = 'url'`, [d!.websiteId]))[0];
