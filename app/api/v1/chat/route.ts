@@ -5,6 +5,7 @@ import { hybridRetrieve } from "@/lib/knowledge/retrieve";
 import { buIdForLegacyTenant } from "@/lib/agents/registry";
 import { handleChatAnswer } from "@/lib/sales/chat-pipeline";
 import { resolveSiteKey } from "@/lib/sales/service";
+import { websiteHasCapability } from "@/lib/connectors/service";
 import { SalesServiceError } from "@/lib/sales/types";
 import { rateLimit, clientIp, hitDailyLlmCap } from "@/lib/security/ratelimit";
 import { isFlagEnabled } from "@/lib/settings";
@@ -84,6 +85,15 @@ export async function POST(req: Request) {
     if (!site || (tenantId !== null && site.legacyTenantId !== tenantId)) {
       await writeAudit({ actorType: "anonymous", actorLabel: "ip", action: "chat.answer", resource: "chat", result: "denied", requestId, ip, metadata: { reason: "invalid_site_key", tenantId: body.tenantId ?? null } });
       return NextResponse.json({ errors: [{ code: "INVALID_SITE_KEY" }] }, { status: 401 });
+    }
+    // P13 (§12/§13): capability grants are LIVE for key-bearing embeds — the
+    // widget connector must hold chat.answer (migration 049 seeded existing
+    // integrations; the wizard grants it at onboarding). Keyless legacy
+    // embeds are unaffected (no site → nothing to enforce against).
+    const chatCapable = await websiteHasCapability(site.websiteId, "chat.answer");
+    if (!chatCapable) {
+      await writeAudit({ actorType: "anonymous", actorLabel: "ip", action: "chat.answer", resource: "chat", result: "denied", requestId, ip, metadata: { reason: "capability_not_granted", websiteId: site.websiteId, capability: "chat.answer" } });
+      return NextResponse.json({ errors: [{ code: "CAPABILITY_NOT_GRANTED" }] }, { status: 403 });
     }
     websiteId = site.websiteId;
     tenantId = site.legacyTenantId;

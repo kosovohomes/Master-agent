@@ -1,12 +1,16 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import OnboardWizard from "./OnboardWizard";
 
 /**
  * /websites — Business Unit + Website administration (Phase 1 M2 acceptance:
  * two BUs + two websites configurable through the UI with zero code changes).
  * Create and edit flows call the guarded admin APIs; the server enforces
  * bu.manage / website.manage and audits every mutation.
+ * Phase 14 (§121): full Add-Website wizard — OnboardWizard — drives the
+ * configuration-only onboarding endpoint (information → agents →
+ * integrations → knowledge → permissions → autonomy → activate).
  */
 type Bu = {
   id: number; slug: string; name: string; status: string;
@@ -221,6 +225,16 @@ export default function WebsitesPage() {
             {websites.length === 0 && <tr><td colSpan={7} className="text-sm" style={{ color: "var(--muted)" }}>None visible.</td></tr>}
           </tbody>
         </table>
+
+        {canManageSite && (
+          <div className="mt-4">
+            <OnboardWizard
+              bus={bus.map((b) => ({ id: b.id, name: b.name }))}
+              canCreateBu={canManageBu}
+              onDone={load}
+            />
+          </div>
+ )}
 
         {canManageSite && (
           <form onSubmit={createWebsite} className="grid gap-3 sm:grid-cols-4 mt-4 items-end">

@@ -57,17 +57,18 @@ try {
 
   // ---------- create + secret handling ----------
   const created = await createWebsiteConnector({ websiteId: a.siteId, displayName: "Main site webhook" });
+  const secret0 = created.signingSecret!;
   const connectorId = created.connector.id;
   check("create: returns connector row", connectorId > 0 && created.connector.type === "webhook" && created.connector.status === "active");
-  check("create: secret is url-safe and long", /^[A-Za-z0-9_-]{40,44}$/.test(created.signingSecret), `len=${created.signingSecret.length}`);
-  check("create: secret never exposed on row reads", (await getConnector(connectorId)) !== null && JSON.stringify(await getConnector(connectorId)).includes(created.signingSecret) === false);
+  check("create: secret is url-safe and long", /^[A-Za-z0-9_-]{40,44}$/.test(secret0), `len=${secret0.length}`);
+  check("create: secret never exposed on row reads", (await getConnector(connectorId)) !== null && JSON.stringify(await getConnector(connectorId)).includes(secret0) === false);
 
   const stored = await query<{ credentials_encrypted: string }>(
     `SELECT credentials_encrypted FROM website_integrations WHERE id = $1`,
     [connectorId]
   );
   check("create: secret encrypted at rest (v2 envelope)", stored[0].credentials_encrypted.startsWith("v2:"));
-  check("create: stored ciphertext decrypts to the secret", decryptChannelToken(stored[0].credentials_encrypted) === created.signingSecret);
+  check("create: stored ciphertext decrypts to the secret", decryptChannelToken(stored[0].credentials_encrypted) === secret0);
 
   const dup = await createWebsiteConnector({ websiteId: a.siteId }).catch((e) => e as ConnectorError);
   check("create: duplicate connector rejected (CONNECTOR_EXISTS)", dup instanceof ConnectorError && dup.code === "CONNECTOR_EXISTS");
@@ -81,11 +82,11 @@ try {
 
   // ---------- rotation ----------
   const rotated = await rotateConnectorSecret(connectorId);
-  check("rotate: new secret differs", rotated.signingSecret !== created.signingSecret);
+  check("rotate: new secret differs", rotated.signingSecret !== secret0);
   check("rotate: rotatedAt stamped", rotated.connector.rotatedAt != null);
   const secrets = await connectorSecrets(connectorId);
   check("rotate: current secret is the new one", secrets.current === rotated.signingSecret);
-  check("rotate: previous secret kept for the rotation window", secrets.previous === created.signingSecret && secrets.rotatedAt != null);
+  check("rotate: previous secret kept for the rotation window", secrets.previous === secret0 && secrets.rotatedAt != null);
   const rotGhost = await rotateConnectorSecret(999999).catch((e) => e as ConnectorError);
   check("rotate: unknown connector rejected (NOT_FOUND)", rotGhost instanceof ConnectorError && rotGhost.code === "NOT_FOUND");
 
@@ -107,8 +108,13 @@ try {
   await grantWebsiteCapability(a.siteId, "READ_CONTENT", true);
   check("grant: hasCapability true when enabled", (await websiteHasCapability(a.siteId, "READ_CONTENT")) === true);
   check("grant: isolation — other website not granted", (await websiteHasCapability(b.siteId, "READ_CONTENT")) === false);
-  const badGrant = await grantWebsiteCapability(a.siteId, "chat.answer", true).catch((e) => e as ConnectorError);
-  check("grant: reserved/unknown capability rejected (INVALID_CAPABILITY)", badGrant instanceof ConnectorError && badGrant.code === "INVALID_CAPABILITY");
+  // P13: chat.answer is a FULL member of the grantable catalog now —
+  // revoking it is the legitimate way to cut a site's chat off (migration
+  // 049 seeds existing widget integrations).
+  const chatGrant = await grantWebsiteCapability(a.siteId, "chat.answer", true);
+  check("grant: chat.answer is grantable (P13 catalog promotion)", chatGrant.capability === "chat.answer" && chatGrant.enabled === true);
+  const badGrant = await grantWebsiteCapability(a.siteId, "NOT_A_CAPABILITY", true).catch((e) => e as ConnectorError);
+  check("grant: unknown capability rejected (INVALID_CAPABILITY)", badGrant instanceof ConnectorError && badGrant.code === "INVALID_CAPABILITY");
   const grants = await listWebsiteCapabilities(a.siteId);
   check("grant: list shows enabled row", grants.some((g) => g.capability === "READ_CONTENT" && g.enabled));
   check("list: capabilities joined into connector row", (await getConnector(connectorId))?.capabilities.includes("READ_CONTENT") === true);

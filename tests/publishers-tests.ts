@@ -225,8 +225,10 @@ try {
   const tE = await mkTenant("t11-e", "Channel Route Tenant");
   createdTenantIds.push(tE);
   const originalToken = "oauthtoken-live-x-secret";
-  // M0 (SEC-C1): the channels route is fail-closed — authenticate with a
-  // fake legacy ops bearer for this section.
+  // P13: the channels route is PERMANENTLY RETIRED (410 ENDPOINT_RETIRED —
+  // every wire-up attempt, authenticated or not). The sweep read path below
+  // is unaffected: credential rows now originate from pre-retirement data
+  // (represented here by a direct insert, exactly what the old route wrote).
   const FAKE_PW = `pub-ops-${Date.now()}`;
   process.env.ADMIN_PASSWORD = FAKE_PW;
   const mkWireReq = (body: unknown) => new Request("http://localhost/api/v1/channels", {
@@ -235,44 +237,19 @@ try {
     body: JSON.stringify(body),
   });
   const w1 = await channelPOST(mkWireReq({ tenantId: tE, kind: "x", token: originalToken }));
-  const j1 = await w1.json();
-  const wireJson = JSON.stringify(j1);
-  check("channels route returns 200 with channel id", w1.status === 200 && Number.isInteger(j1?.data?.channelId) && j1?.data?.tenantId === tE, wireJson);
-  check("channels route never echoes the plaintext token", !wireJson.includes(originalToken));
+  const w1body = (await w1.json()) as { errors?: { code?: string }[] };
+  check("channels route is retired -> 410 ENDPOINT_RETIRED (any auth)", w1.status === 410 && w1body.errors?.[0]?.code === "ENDPOINT_RETIRED", `status=${w1.status}`);
+  await addChannelsRow(tE, "x", originalToken);
   const encRows = await query<{ token_encrypted: string }>("SELECT token_encrypted FROM channels WHERE tenant_id = $1 AND kind = 'x'", [tE]);
-  check("channels route stores ciphertext, never plaintext",
+  check("channel credential row stores ciphertext, never plaintext",
     encRows.length === 1 && encRows[0].token_encrypted !== originalToken && /^(v2:[^:]+:)?[0-9a-f]+:[0-9a-f]+:[0-9a-f]+$/.test(encRows[0].token_encrypted), encRows[0].token_encrypted);
-  check("channels route round-trip decrypts to original token",
+  check("channel credential row round-trip decrypts to original token",
     decryptChannelToken(encRows[0].token_encrypted) === originalToken);
 
-  // re-wire upserts in place (unique tenant+kind) with a new token
-  const w2 = await channelPOST(mkWireReq({ tenantId: tE, kind: "x", token: "rotated-token-777" }));
-  const j2 = await w2.json();
-  const encRows2 = await query<{ token_encrypted: string }>("SELECT token_encrypted FROM channels WHERE tenant_id = $1 AND kind = 'x'", [tE]);
-  check("re-wire upserts one channel row and decrypts to new token",
-    w2.status === 200 && encRows2.length === 1 && j2?.data?.channelId === j1?.data?.channelId &&
-    encRows2[0].token_encrypted !== encRows[0].token_encrypted &&
-    decryptChannelToken(encRows2[0].token_encrypted) === "rotated-token-777", JSON.stringify(encRows2));
-
-  const badWires: { body: unknown; code: string }[] = [
-    { body: { tenantId: tE, kind: "x" }, code: "INVALID_CHANNEL_WIREUP" },
-    { body: { tenantId: tE, kind: "x", token: "" }, code: "INVALID_CHANNEL_WIREUP" },
-    { body: { tenantId: "nope", kind: "x", token: "t" }, code: "INVALID_CHANNEL_WIREUP" },
-    { body: { tenantId: tE, kind: "slack", token: "t" }, code: "INVALID_CHANNEL_KIND" },
-  ];
-  let allBad = true;
-  for (const bw of badWires) {
-    const r = await channelPOST(mkWireReq(bw.body));
-    const j = await r.json();
-    if (r.status !== 400 || j?.errors?.[0]?.code !== bw.code) { allBad = false; console.log(`  wire-up bad ${JSON.stringify(bw.body)} -> ${r.status} ${JSON.stringify(j)}`); }
-  }
-  check("channels route rejects malformed wire-ups with 400", allBad);
-
-  // invalid JSON body (authenticated: the M0 auth gate precedes body parsing)
-  const badJsonRes = await channelPOST(new Request("http://localhost/api/v1/channels", {
-    method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${FAKE_PW}` }, body: "{not json",
-  }));
-  check("channels route rejects unparseable body with 400", badJsonRes.status === 400);
+  // the read path (publishers sweep) still resolves the stored credential
+  const readRows = await query<{ token_encrypted: string }>(
+    "SELECT token_encrypted FROM channels WHERE tenant_id = $1 AND kind = 'x'", [tE]);
+  check("publishers read path unaffected by the retirement", readRows.length === 1 && decryptChannelToken(readRows[0].token_encrypted) === originalToken);
 
   // ==================================================================
   // 8. sweep route: 401 for wrong/absent x-cron-secret with NO side effects

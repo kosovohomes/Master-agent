@@ -1,84 +1,54 @@
 import { NextResponse } from "next/server";
-import { query } from "@/lib/db";
-import { encryptChannelToken } from "@/lib/channels";
-import { sessionOrLegacyBearer } from "@/lib/auth/guards";
 import { rateLimit, clientIp } from "@/lib/security/ratelimit";
 import { writeAudit, requestIdFor } from "@/lib/audit";
-import type { ChannelKind } from "@/lib/agents/publishers/index";
 
 export const runtime = "nodejs";
 
-const CHANNEL_KINDS: ChannelKind[] = ["linkedin", "x", "instagram", "tiktok", "email"];
-
 /**
- * POST /api/v1/channels — channel credential wire-up.
+ * POST /api/v1/channels — RETIRED (Phase 14, roadmap P13: "Integration
+ * management UI replaces the P1-guarded channels endpoint permanently").
  *
- * Phase 1 M0 (SEC-C1): this was an unauthenticated mutation that let any
- * internet caller plant/overwrite publishing credentials for any enumerable
- * tenant. It is now fail-closed: a session holding website.manage, or —
- * during the flag-gated transition window — a legacy ops/admin bearer.
- * Per-IP rate limiting applies; every attempt is audited.
+ * History: Phase 1 M0 (SEC-C1) found this endpoint as an UNAUTHENTICATED
+ * mutation that let any internet caller plant publishing credentials for any
+ * enumerable tenant; it was fail-closed (session + website.manage, rate
+ * limited, audited) as an emergency stop-gap. P13 retires it for good:
+ *  - website→platform integrations are WIRE-UP FREE via signed webhook
+ *    connectors (POST /api/admin/connectors, reveal-once secret);
+ *  - platform→platform publishing credentials are wired through the social
+ *    OAuth surface (P9 social_accounts) and the connector model — never by
+ *    raw token paste;
+ *  - the legacy publishers keep READ-ONLY access to existing `channels`
+ *    rows, so previously wired tenants continue to function; there is simply
+ *    no remaining write path through this endpoint.
+ *
+ * The endpoint now answers 410 GONE (permanent), is rate limited, and every
+ * attempt is audited — including the request SHAPE only (never any body
+ * content; a body is not even read). Callers get the replacement surfaces.
  */
 export async function POST(req: Request) {
   const requestId = requestIdFor(req);
   const ip = clientIp(req);
 
-  const rl = await rateLimit(`channels:${ip}`, 10, 10 * 60 * 1000);
+  const rl = await rateLimit(`channels-retired:${ip}`, 10, 10 * 60 * 1000);
   if (!rl.allowed) {
-    await writeAudit({ actorType: "anonymous", actorLabel: "ip", action: "channels.wireup", resource: "channels", result: "denied", requestId, ip, metadata: { reason: "rate_limited" } });
+    await writeAudit({ actorType: "anonymous", actorLabel: "ip", action: "channels.wireup", resource: "channels", result: "denied", requestId, ip, metadata: { reason: "rate_limited", retired: true } });
     return NextResponse.json({ errors: [{ code: "RATE_LIMITED" }] }, { status: 429, headers: { "Retry-After": String(rl.retryAfterSec) } });
   }
 
-  const gate = await sessionOrLegacyBearer(req, "website.manage");
-  if (!gate.ok) {
-    await writeAudit({ actorType: "anonymous", actorLabel: "ip", action: "channels.wireup", resource: "channels", result: "denied", requestId, ip, metadata: { reason: "unauthorized" } });
-    return gate.response;
-  }
-
-  let body: { tenantId?: number; kind?: string; token?: string };
-  try {
-    body = (await req.json()) as typeof body;
-  } catch {
-    return NextResponse.json({ errors: [{ code: "INVALID_CHANNEL_WIREUP" }] }, { status: 400 });
-  }
-  if (!Number.isInteger(body.tenantId) || typeof body.kind !== "string" || typeof body.token !== "string" || body.token.trim() === "") {
-    return NextResponse.json({ errors: [{ code: "INVALID_CHANNEL_WIREUP" }] }, { status: 400 });
-  }
-  const kind = body.kind as ChannelKind;
-  if (!CHANNEL_KINDS.includes(kind)) {
-    return NextResponse.json({ errors: [{ code: "INVALID_CHANNEL_KIND" }] }, { status: 400 });
-  }
-  try {
-    const tokenEncrypted = encryptChannelToken(body.token);
-    const rows = await query<{ id: number }>(
-      `INSERT INTO channels (tenant_id, kind, token_encrypted, status)
-       VALUES ($1, $2, $3, 'healthy')
-       ON CONFLICT (tenant_id, kind) DO UPDATE
-       SET token_encrypted = EXCLUDED.token_encrypted, status = 'healthy'
-       RETURNING id`,
-      [body.tenantId as number, kind, tokenEncrypted]
-    );
-    await writeAudit({
-      actorType: gate.ctx.user ? "user" : "system",
-      actorId: gate.ctx.user?.id ?? null,
-      actorLabel: gate.ctx.user ? undefined : gate.ctx.via === "legacy-bearer" ? "ops:bearer" : null,
-      action: "channels.wireup",
-      resource: "channels",
-      resourceId: rows[0].id,
-      result: "success",
-      requestId,
-      ip,
-      metadata: { tenantId: body.tenantId, kind, via: gate.ctx.via },
-    });
-    return NextResponse.json({
-      data: { channelId: rows[0].id, kind, tenantId: body.tenantId },
-      meta: { ts: new Date().toISOString(), requestId },
-    });
-  } catch (e) {
-    if ((e as { code?: string }).code === "23503") {
-      return NextResponse.json({ errors: [{ code: "UNKNOWN_TENANT" }] }, { status: 404 });
+  await writeAudit({ actorType: "anonymous", actorLabel: "ip", action: "channels.wireup", resource: "channels", result: "denied", requestId, ip, metadata: { reason: "endpoint_retired" } });
+  return NextResponse.json(
+    {
+      errors: [
+        {
+          code: "ENDPOINT_RETIRED",
+          detail:
+            "POST /api/v1/channels was permanently retired in Phase 14. Wire website integrations via POST /api/admin/connectors (signed webhook connectors) and publishing credentials via the social accounts OAuth surface.",
+        },
+      ],
+    },
+    {
+      status: 410,
+      headers: { "Retry-After": "86400", "Link": '</api/admin/connectors>; rel="replacement"' },
     }
-    await writeAudit({ actorType: gate.ctx.user ? "user" : "system", actorId: gate.ctx.user?.id ?? null, action: "channels.wireup", resource: "channels", result: "failure", requestId, ip, metadata: { tenantId: body.tenantId, kind } });
-    return NextResponse.json({ errors: [{ code: "CHANNEL_WIREUP_FAILED", detail: "internal error" }] }, { status: 500 });
-  }
+  );
 }

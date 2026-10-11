@@ -73,7 +73,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   }
 
   try {
-    const { connector, signingSecret } = await rotateConnectorSecret(id);
+    const res = await rotateConnectorSecret(id);
     await writeAudit({
       actorType: "user",
       actorId: gate.ctx.user?.id ?? null,
@@ -82,12 +82,18 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       resourceId: id,
       result: "success",
       requestId,
-      metadata: { websiteId: connector.websiteId, rotatedAt: connector.rotatedAt },
+      metadata: { websiteId: res.connector.websiteId, rotatedAt: res.connector.rotatedAt, type: res.connector.type },
     });
-    return NextResponse.json(
-      { data: { connector, signingSecret, warning: "Store this signing secret now — it is shown only once." }, meta: { requestId } },
-      { status: 200 }
-    );
+    // Reveal-once by connector type: webhook → signingSecret, widget → siteKey.
+    const data: Record<string, unknown> = { connector: res.connector };
+    if (res.siteKey) {
+      data.siteKey = res.siteKey;
+      data.warning = "Store this site key now — it is shown only once.";
+    } else if (res.signingSecret) {
+      data.signingSecret = res.signingSecret;
+      data.warning = "Store this signing secret now — it is shown only once.";
+    }
+    return NextResponse.json({ data, meta: { requestId } }, { status: 200 });
   } catch (e) {
     if (e instanceof ConnectorError && e.code === "NOT_FOUND") {
       return NextResponse.json({ errors: [{ code: "NOT_FOUND" }] }, { status: 404 });

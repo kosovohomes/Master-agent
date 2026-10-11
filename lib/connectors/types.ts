@@ -23,25 +23,33 @@ export const CONNECTOR_CAPABILITIES = [
   "READ_ANALYTICS",
   "SEND_NOTIFICATION",
   "READ_PRODUCTS",
+  "chat.answer",
 ] as const;
 
 export type ConnectorCapability = (typeof CONNECTOR_CAPABILITIES)[number];
 
 /**
- * `chat.answer` is the widget/chat pair formalized as the first connector
- * capability (§411) — reserved for Phase 11/13 where the widget is re-keyed
- * from bare tenant id to a site embed token. It is NOT grantable through the
- * Phase 6 admin surface; it appears in the catalog so later phases inherit
- * the type without a migration.
+ * `chat.answer` (P13) — the widget/chat pair is now a fully grantable
+ * capability (§13 connector #1, §411 completion): the public chat/inquiry
+ * routes REQUIRE it when a site key is presented, and migration 050 seeds
+ * the grant for widget integrations that predate enforcement.
+ *
+ * RESERVED_CAPABILITIES remains exported (empty) so Phase 6 imports keep
+ * compiling; new capabilities may be reserved here again in later phases.
  */
-export const RESERVED_CAPABILITIES = ["chat.answer"] as const;
+export const RESERVED_CAPABILITIES = [] as const;
 
 export function isGrantableCapability(value: string): value is ConnectorCapability {
   return (CONNECTOR_CAPABILITIES as readonly string[]).includes(value);
 }
 
-/** Connector types Phase 6 ships (integration_type on website_integrations). */
-export const CONNECTOR_TYPES = ["webhook"] as const;
+/**
+ * Connector types (integration_type on website_integrations).
+ * P13 adds "widget": the site-registered embed connector (§13 connector #1)
+ * whose credential is a generated site key stored in config.siteKey —
+ * presented by the embed and resolved by resolveSiteKey (lib/sales/service).
+ */
+export const CONNECTOR_TYPES = ["webhook", "widget"] as const;
 export type ConnectorType = (typeof CONNECTOR_TYPES)[number];
 
 /**

@@ -28,6 +28,20 @@ export function generateSigningSecret(): string {
   return crypto.randomBytes(32).toString("base64url");
 }
 
+/**
+ * Widget site key (P13 — §13 connector #1): `wgt_<48 hex>` random credential
+ * stored in the widget integration's config.siteKey and presented by the
+ * embed as x-agentos-site-key / data-site-key. Shown ONCE at create/rotate.
+ * At-rest model matches the existing resolveSiteKey lookup (plaintext
+ * equality on config->>'siteKey'): a site key only opens the rate-limited
+ * public surfaces of ITS OWN site and is revocable by disabling the
+ * integration — unlike webhook signing secrets, which gate knowledge
+ * ingestion and therefore use the AES-256-GCM envelope.
+ */
+export function generateSiteKey(): string {
+  return `wgt_${crypto.randomBytes(24).toString("hex")}`;
+}
+
 export function signPayload(secret: string, timestampSec: number, rawBody: string): string {
   return crypto.createHmac("sha256", secret).update(`${timestampSec}.${rawBody}`).digest("hex");
 }

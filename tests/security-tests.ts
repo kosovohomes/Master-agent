@@ -88,27 +88,17 @@ try {
   const sw = await sweepRoute.POST(new Request("http://localhost/api/agents/sweep", { method: "POST", headers: { "x-cron-secret": "wrong-secret" } }));
   check("sweep: wrong cron secret -> 401 UNAUTHORIZED", sw.status === 401 && (await sw.json()).errors?.[0]?.code === "UNAUTHORIZED", `status=${sw.status}`);
 
-  // ---------- fold-in: channels route —— M0 guard + FK on unknown tenant -> 404, missing key -> 500 w/o internals ----------
+  // ---------- fold-in: channels route —— P13 PERMANENT RETIREMENT: every
+  // wire-up attempt answers 410 ENDPOINT_RETIRED (audited, rate-limited);
+  // the legacy token write path no longer exists through this endpoint.
   const chanUnauth = await channelsRoute.POST(postJson("/api/v1/channels", { "Content-Type": "application/json" }, { tenantId: 999999999, kind: "email", token: "abc" }));
-  check("channels: unauthenticated mutation -> 401 (SEC-C1)", chanUnauth.status === 401 && (await chanUnauth.json()).errors?.[0]?.code === "UNAUTHORIZED", `status=${chanUnauth.status}`);
+  check("channels: unauthenticated attempt -> 410 ENDPOINT_RETIRED (fail-closed)", chanUnauth.status === 410 && (await chanUnauth.json()).errors?.[0]?.code === "ENDPOINT_RETIRED", `status=${chanUnauth.status}`);
 
   const noTenant = await channelsRoute.POST(postJson("/api/v1/channels", auth(FAKE_PW), { tenantId: 999999999, kind: "email", token: "abc" }));
-  check("channels: FK on unknown tenant -> 404 UNKNOWN_TENANT", noTenant.status === 404 && (await noTenant.json()).errors?.[0]?.code === "UNKNOWN_TENANT", `status=${noTenant.status}`);
+  check("channels: authenticated attempt also -> 410 (no write path remains)", noTenant.status === 410, `status=${noTenant.status}`);
 
-  const savedKey = process.env.CHANNEL_ENC_KEY;
-  delete process.env.CHANNEL_ENC_KEY;
-  const noKeyRes = await routeCall(() => channelsRoute.POST(postJson("/api/v1/channels", auth(FAKE_PW), { tenantId: tenantId, kind: "email", token: "abc" })));
-  process.env.CHANNEL_ENC_KEY = savedKey;
-  const noKeyBody = noKeyRes === "THREW" ? {} : (await (noKeyRes as Response).json());
-  check("channels: missing enc key -> 500, internal detail not echoed", noKeyRes !== "THREW" && (noKeyRes as Response).status === 500 && noKeyBody.errors?.[0]?.code === "CHANNEL_WIREUP_FAILED" && !JSON.stringify(noKeyBody).includes("CHANNEL_ENC_KEY must"), `status=${noKeyRes === "THREW" ? "THREW" : (noKeyRes as Response).status}`);
-
-  // fold-in: valid wire-up through the public route stores an encrypted token, readable via env key
-  const wire = await channelsRoute.POST(postJson("/api/v1/channels", auth(FAKE_PW), { tenantId: tenantId, kind: "email", token: "super-secret-token" }));
-  const wireBody = (await wire.json()) as { data?: { channelId: number } };
-  check("channels: valid wire-up -> 200 channelId", wire.status === 200 && typeof wireBody.data?.channelId === "number", `status=${wire.status}`);
-  const wireRow = await query<{ token_encrypted: string }>("SELECT token_encrypted FROM channels WHERE tenant_id = $1 AND kind = 'email'", [tenantId]);
-  check("channels: stored token is encrypted, not plaintext", wireRow[0]?.token_encrypted !== undefined && wireRow[0].token_encrypted !== "super-secret-token" && wireRow[0].token_encrypted.includes(":"));
-  check("channels: env-key decrypt recovers the same token", decryptChannelToken(wireRow[0].token_encrypted) === "super-secret-token");
+  const chanRow = await query<{ n: string }>("SELECT count(*)::text AS n FROM channels WHERE kind = 'email' AND token_encrypted = 'abc'");
+  check("channels: retired endpoint writes nothing", chanRow[0].n === "0");
 
   // ---------- fold-in: widget config —— unknown tenant is 404, no internal text echoed ----------
   const wRes = await widgetRoute.GET(new Request("http://localhost/api/v1/widget/config?tenant=no-such-sec-tenant"));

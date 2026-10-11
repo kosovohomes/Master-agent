@@ -61,8 +61,8 @@ const c = await setupSite("c");
 
 let flagBefore = true;
 try {
-  const secretA = (await createWebsiteConnector({ websiteId: a.siteId, displayName: "Route test webhook" })).signingSecret;
-  const secretB = (await createWebsiteConnector({ websiteId: b.siteId })).signingSecret;
+  const secretA = (await createWebsiteConnector({ websiteId: a.siteId, displayName: "Route test webhook" })).signingSecret!;
+  const secretB = (await createWebsiteConnector({ websiteId: b.siteId })).signingSecret!;
   await grantWebsiteCapability(a.siteId, "READ_CONTENT", true);
 
   // ---------- flag gate ----------

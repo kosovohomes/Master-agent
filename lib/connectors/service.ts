@@ -20,7 +20,7 @@
  */
 import { query } from "../db";
 import { encryptChannelToken, decryptChannelToken } from "../channels";
-import { generateSigningSecret } from "./crypto";
+import { generateSigningSecret, generateSiteKey } from "./crypto";
 import {
   CONNECTOR_CAPABILITIES,
   CONNECTOR_TYPES,
@@ -133,10 +133,20 @@ export async function getWebsiteConnector(
 
 export interface CreateConnectorResult {
   connector: ConnectorRow;
-  /** The raw signing secret — shown to the admin EXACTLY ONCE. */
-  signingSecret: string;
+  /** The raw signing secret — shown to the admin EXACTLY ONCE (webhook type). */
+  signingSecret?: string;
+  /** The raw site key — shown to the admin EXACTLY ONCE (widget type). */
+  siteKey?: string;
 }
 
+/**
+ * Create a connector of `type` for the website. UNIQUE (website_id,
+ * integration_type) → one connector per type per site.
+ *  - webhook: generates a signing secret, AES-256-GCM encrypted at rest.
+ *  - widget (P13): generates a site key stored in config.siteKey — the
+ *    credential the embed presents (resolveSiteKey looks it up by equality).
+ * Both credentials are returned EXACTLY ONCE by this function.
+ */
 export async function createWebsiteConnector(p: {
   websiteId: number;
   type?: string;
@@ -148,6 +158,23 @@ export async function createWebsiteConnector(p: {
   }
   const site = await query<{ id: number }>("SELECT id FROM websites WHERE id = $1", [p.websiteId]);
   if (site.length === 0) throw new ConnectorError("UNKNOWN_WEBSITE", `unknown website ${p.websiteId}`);
+
+  if (type === "widget") {
+    const siteKey = generateSiteKey();
+    const rows = await query<{ id: number }>(
+      `INSERT INTO website_integrations (website_id, integration_type, status, config, display_name)
+       VALUES ($1, 'widget', 'active', $2::jsonb, $3)
+       ON CONFLICT (website_id, integration_type) DO NOTHING
+       RETURNING id`,
+      [p.websiteId, JSON.stringify({ siteKey }), p.displayName ?? null]
+    );
+    if (rows.length === 0) {
+      throw new ConnectorError("CONNECTOR_EXISTS", `website ${p.websiteId} already has a widget connector — rotate instead`);
+    }
+    const connector = await getConnector(rows[0].id);
+    if (!connector) throw new ConnectorError("VANISHED", "connector vanished after insert");
+    return { connector, siteKey };
+  }
 
   const secret = generateSigningSecret();
   const rows = await query<{ id: number }>(
@@ -167,14 +194,34 @@ export async function createWebsiteConnector(p: {
 
 /**
  * Zero-downtime rotation (§77): current secret → previous (kept for the
- * rotation window), new secret becomes current. Returns the new secret ONCE.
+ * rotation window), new secret becomes current. For widget connectors the
+ * site key is replaced in config (the old key stops resolving the moment
+ * the config is overwritten — embed cut-over is immediate, no window).
+ * Returns the new credential ONCE.
  */
 export async function rotateConnectorSecret(id: number): Promise<CreateConnectorResult> {
-  const rows = await query<{ credentials_encrypted: string | null }>(
-    `SELECT credentials_encrypted FROM website_integrations WHERE id = $1 AND integration_type = 'webhook'`,
+  const rows = await query<{ integration_type: string; credentials_encrypted: string | null }>(
+    `SELECT integration_type, credentials_encrypted FROM website_integrations
+     WHERE id = $1 AND integration_type IN ('webhook','widget')`,
     [id]
   );
-  if (rows.length === 0 || !rows[0].credentials_encrypted) {
+  if (rows.length === 0) {
+    throw new ConnectorError("NOT_FOUND", `connector not found: ${id}`);
+  }
+  if (rows[0].integration_type === "widget") {
+    const siteKey = generateSiteKey();
+    await query(
+      `UPDATE website_integrations
+       SET config = jsonb_set(COALESCE(config, '{}'::jsonb), '{siteKey}', to_jsonb($2::text), true),
+           rotated_at = now(), updated_at = now()
+       WHERE id = $1`,
+      [id, siteKey]
+    );
+    const widget = await getConnector(id);
+    if (!widget) throw new ConnectorError("VANISHED", "connector vanished after rotate");
+    return { connector: widget, siteKey };
+  }
+  if (!rows[0].credentials_encrypted) {
     throw new ConnectorError("NOT_FOUND", `connector not found: ${id}`);
   }
   const secret = generateSigningSecret();
@@ -202,7 +249,7 @@ export async function setConnectorStatus(
 
 export async function deleteConnector(id: number): Promise<boolean> {
   const rows = await query<{ id: number }>(
-    `DELETE FROM website_integrations WHERE id = $1 AND integration_type = 'webhook' RETURNING id`,
+    `DELETE FROM website_integrations WHERE id = $1 AND integration_type IN ('webhook','widget') RETURNING id`,
     [id]
   );
   return rows.length > 0;

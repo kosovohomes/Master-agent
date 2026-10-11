@@ -61,6 +61,7 @@ const CAPABILITIES = [
   "READ_ANALYTICS",
   "SEND_NOTIFICATION",
   "READ_PRODUCTS",
+  "chat.answer",
 ];
 
 function Badge({ status }: { status: string }) {
@@ -77,8 +78,9 @@ export default function ConnectorsPage() {
   // create form
   const [websiteId, setWebsiteId] = useState("");
   const [displayName, setDisplayName] = useState("");
+  const [newType, setNewType] = useState<"webhook" | "widget">("webhook");
   // reveal-once secret
-  const [secret, setSecret] = useState<{ connectorId: number; secret: string } | null>(null);
+  const [secret, setSecret] = useState<{ connectorId: number; secret: string; kind: "signingSecret" | "siteKey" } | null>(null);
   // grants + deliveries for the selected connector
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [grants, setGrants] = useState<Record<string, boolean>>({});
@@ -135,12 +137,19 @@ export default function ConnectorsPage() {
       const res = await fetch("/api/admin/connectors", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ websiteId: Number(websiteId), displayName: displayName || null }),
+        body: JSON.stringify({ websiteId: Number(websiteId), displayName: displayName || null, type: newType }),
       });
-      const j = (await res.json()) as { data?: { connector: Connector; signingSecret: string }; errors?: { detail?: string }[] };
+      const j = (await res.json()) as { data?: { connector: Connector; signingSecret?: string; siteKey?: string }; errors?: { detail?: string }[] };
       if (!res.ok || !j.data) { setError(j.errors?.[0]?.detail ?? `Create failed (${res.status})`); return; }
-      setSecret({ connectorId: j.data.connector.id, secret: j.data.signingSecret });
-      setNotice(`Connector #${j.data.connector.id} created. The signing secret is shown once below.`);
+      if (j.data.siteKey) {
+        setSecret({ connectorId: j.data.connector.id, secret: j.data.siteKey, kind: "siteKey" });
+        setNotice(`Widget connector #${j.data.connector.id} created. The site key is shown once below.`);
+      } else if (j.data.signingSecret) {
+        setSecret({ connectorId: j.data.connector.id, secret: j.data.signingSecret, kind: "signingSecret" });
+        setNotice(`Connector #${j.data.connector.id} created. The signing secret is shown once below.`);
+      } else {
+        setNotice(`Connector #${j.data.connector.id} created.`);
+      }
       setWebsiteId(""); setDisplayName("");
       await load();
       select(j.data.connector);
@@ -151,10 +160,15 @@ export default function ConnectorsPage() {
     setBusy(`rot-${c.id}`); setNotice(""); setError(""); setSecret(null);
     try {
       const res = await fetch(`/api/admin/connectors/${c.id}`, { method: "POST" });
-      const j = (await res.json()) as { data?: { signingSecret: string }; errors?: { detail?: string }[] };
+      const j = (await res.json()) as { data?: { signingSecret?: string; siteKey?: string }; errors?: { detail?: string }[] };
       if (!res.ok || !j.data) { setError(j.errors?.[0]?.detail ?? `Rotate failed (${res.status})`); return; }
-      setSecret({ connectorId: c.id, secret: j.data.signingSecret });
-      setNotice(`Secret rotated for connector #${c.id}. The previous secret stays valid for 24h (zero-downtime cutover).`);
+      if (j.data.siteKey) {
+        setSecret({ connectorId: c.id, secret: j.data.siteKey, kind: "siteKey" });
+        setNotice(`Site key rotated for connector #${c.id}. The previous key stops resolving immediately — update the embed.`);
+      } else if (j.data.signingSecret) {
+        setSecret({ connectorId: c.id, secret: j.data.signingSecret, kind: "signingSecret" });
+        setNotice(`Secret rotated for connector #${c.id}. The previous secret stays valid for 24h (zero-downtime cutover).`);
+      }
       await load();
     } finally { setBusy(""); }
   }
@@ -226,15 +240,25 @@ export default function ConnectorsPage() {
 
       {secret && (
         <section className="cc-card p-4" style={{ borderColor: "rgba(250,204,21,0.4)" }}>
-          <h2 className="font-semibold mb-2">Signing secret for connector #{secret.connectorId} — shown once</h2>
-          <p className="text-xs mb-2" style={{ color: "var(--muted)" }}>
-            Configure your site to send: <code>POST {webhookBase}/api/integrations/{connectors.find((c) => c.id === secret.connectorId)?.websiteId ?? "&lt;websiteId&gt;"}/events</code> with headers
-            <code> X-AgentOS-Signature: t=&lt;unix_seconds&gt;,v1=hex</code> and <code>X-AgentOS-Delivery</code>, where
-            <code> v1 = HMAC_SHA256(secret, t + &quot;.&quot; + rawBody)</code>.
-          </p>
+          <h2 className="font-semibold mb-2">
+            {secret.kind === "siteKey" ? "Site key" : "Signing secret"} for connector #{secret.connectorId} — shown once
+          </h2>
+          {secret.kind === "signingSecret" && (
+            <p className="text-xs mb-2" style={{ color: "var(--muted)" }}>
+              Configure your site to send: <code>POST {webhookBase}/api/integrations/{connectors.find((c) => c.id === secret.connectorId)?.websiteId ?? "&lt;websiteId&gt;"}/events</code> with headers
+              <code> X-AgentOS-Signature: t=&lt;unix_seconds&gt;,v1=hex</code> and <code>X-AgentOS-Delivery</code>, where
+              <code> v1 = HMAC_SHA256(secret, t + &quot;.&quot; + rawBody)</code>.
+            </p>
+          )}
+          {secret.kind === "siteKey" && (
+            <p className="text-xs mb-2" style={{ color: "var(--muted)" }}>
+              Embed the widget with <code>data-site-key="{secret.secret.slice(0, 8)}…"</code> (full value below) — the embed presents it as
+              <code> x-agentos-site-key</code>; chat and lead intake for this site require the chat.answer / CREATE_LEAD grants.
+            </p>
+          )}
           <div className="flex items-center gap-2">
             <code className="text-xs p-2 rounded-lg flex-1 overflow-x-auto" style={{ background: "rgba(255,255,255,0.05)" }}>{secret.secret}</code>
-            <button className="cc-btn" onClick={() => { void navigator.clipboard?.writeText(secret.secret); setNotice("Secret copied to clipboard."); }}>
+            <button className="cc-btn" onClick={() => { void navigator.clipboard?.writeText(secret.secret); setNotice("Copied to clipboard."); }}>
               Copy
             </button>
             <button className="cc-btn" onClick={() => setSecret(null)}>I stored it</button>
@@ -304,11 +328,17 @@ export default function ConnectorsPage() {
 
       <section className="cc-card p-4">
         <h2 className="font-semibold mb-3">Create connector</h2>
-        <div className="grid gap-3 md:grid-cols-3">
+        <div className="grid gap-3 md:grid-cols-4">
           <label className="text-xs" style={{ color: "var(--muted)" }}>Website
             <select className={`${input} mt-1`} value={websiteId} onChange={(e) => setWebsiteId(e.target.value)}>
               <option value="">choose a website…</option>
               {websites.map((w) => <option key={w.id} value={w.id}>{w.name} (#{w.id})</option>)}
+            </select>
+          </label>
+          <label className="text-xs" style={{ color: "var(--muted)" }}>Type
+            <select className={`${input} mt-1`} value={newType} onChange={(e) => setNewType(e.target.value as "webhook" | "widget")}>
+              <option value="webhook">webhook (signed events)</option>
+              <option value="widget">widget (site key embed)</option>
             </select>
           </label>
           <label className="text-xs" style={{ color: "var(--muted)" }}>Display name
@@ -316,7 +346,7 @@ export default function ConnectorsPage() {
           </label>
           <div className="flex items-end">
             <button className="cc-btn cc-btn-primary" disabled={busy !== "" || websiteId === ""} onClick={createConnector}>
-              {busy === "create" ? "Creating…" : "Create webhook connector"}
+              {busy === "create" ? "Creating…" : `Create ${newType} connector`}
             </button>
           </div>
         </div>

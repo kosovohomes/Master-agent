@@ -8,12 +8,14 @@ import { writeAudit, requestIdFor } from "@/lib/audit";
 export const runtime = "nodejs";
 
 /**
- * /api/admin/connectors (Phase 6 — website connectors, §12/§411).
+ * /api/admin/connectors (Phase 6; P13 adds the widget type).
  *  GET  — connectors.manage / audit.read: every connector with its website,
  *         capability grants, and 24h delivery stats (+ flag state for the UI).
- *  POST — connectors.manage: create a webhook connector for a website
- *         {websiteId, displayName?, type?}. The signing secret is returned
- *         EXACTLY ONCE in this response — encrypted at rest, never audited.
+ *  POST — connectors.manage: create a connector for a website
+ *         {websiteId, displayName?, type?: webhook|widget}. The webhook
+ *         signing secret / widget site key is returned EXACTLY ONCE in this
+ *         response — encrypted at rest (webhook) / config-stored (widget),
+ *         never audited.
  */
 export async function GET(req: Request) {
   const requestId = requestIdFor(req);
@@ -56,22 +58,28 @@ export async function POST(req: Request) {
   const displayName = body.displayName != null ? String(body.displayName).slice(0, 120) : null;
 
   try {
-    const { connector, signingSecret } = await createWebsiteConnector({ websiteId, type, displayName });
+    const res = await createWebsiteConnector({ websiteId, type, displayName });
     await writeAudit({
       actorType: "user",
       actorId: gate.ctx.user?.id ?? null,
       action: "connector.create",
       resource: "website_integrations",
-      resourceId: connector.id,
+      resourceId: res.connector.id,
       result: "success",
       requestId,
-      // signingSecret deliberately omitted — secrets never enter the audit log
+      // credentials deliberately omitted — secrets never enter the audit log
       metadata: { websiteId, type, displayName },
     });
-    return NextResponse.json(
-      { data: { connector, signingSecret, warning: "Store this signing secret now — it is shown only once." }, meta: { requestId } },
-      { status: 201 }
-    );
+    // Reveal-once by connector type: webhook → signingSecret, widget → siteKey.
+    const data: Record<string, unknown> = { connector: res.connector };
+    if (res.siteKey) {
+      data.siteKey = res.siteKey;
+      data.warning = "Store this site key now — it is shown only once.";
+    } else if (res.signingSecret) {
+      data.signingSecret = res.signingSecret;
+      data.warning = "Store this signing secret now — it is shown only once.";
+    }
+    return NextResponse.json({ data, meta: { requestId } }, { status: 201 });
   } catch (e) {
     if (e instanceof ConnectorError) {
       return NextResponse.json({ errors: [{ code: e.code, detail: e.message }] }, { status: 400 });

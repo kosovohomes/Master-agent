@@ -2147,6 +2147,23 @@ JOIN permissions p ON p.key = 'analytics.manage'
 WHERE r.key IN ('owner','administrator')
 ON CONFLICT DO NOTHING;`;
 
+/**
+ * Phase 14 (roadmap P13 — website connectors): capability grants go LIVE for
+ * the widget connector. `chat.answer` and `CREATE_LEAD` are now ENFORCED on
+ * the public chat/inquiry routes whenever a site key is presented; this
+ * migration seeds both grants for every ACTIVE widget integration that
+ * predates enforcement so existing embeds keep working unchanged (fail-open
+ * only for keyless legacy embeds, which stay accepted by design).
+ */
+const M_049_CONNECTOR_CAPABILITY_SEED = `
+INSERT INTO website_capabilities (website_id, capability, enabled)
+SELECT wi.website_id, c.capability, TRUE
+FROM website_integrations wi
+CROSS JOIN (VALUES ('chat.answer'), ('CREATE_LEAD')) AS c(capability)
+WHERE wi.integration_type = 'widget'
+  AND wi.status = 'active'
+ON CONFLICT (website_id, capability) DO NOTHING;`;
+
 export const MIGRATIONS: MigrationDef[] = [
   { version: "000", name: "agentos_legacy_baseline", source: M_000_LEGACY_BASELINE },
   { version: "001", name: "schema_migrations", source: M_001_SCHEMA_MIGRATIONS },
@@ -2197,6 +2214,7 @@ export const MIGRATIONS: MigrationDef[] = [
   { version: "046", name: "analytics_workforce", source: M_046_ANALYTICS_WORKFORCE },
   { version: "047", name: "analytics_agents", source: M_047_ANALYTICS_AGENTS },
   { version: "048", name: "analytics_flag_permissions", source: M_048_ANALYTICS_FLAG_PERMS },
+  { version: "049", name: "connector_capability_seed", source: M_049_CONNECTOR_CAPABILITY_SEED },
 ];
 
 /**

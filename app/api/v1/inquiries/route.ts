@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { BudgetExceededError } from "@/lib/ai";
 import { buIdForLegacyTenant } from "@/lib/agents/registry";
 import { createInquiry, resolveSiteKey } from "@/lib/sales/service";
+import { websiteHasCapability } from "@/lib/connectors/service";
 import { processInquiry } from "@/lib/sales/tasks";
 import { rateLimit, clientIp, hitDailyLlmCap } from "@/lib/security/ratelimit";
 import { isFlagEnabled } from "@/lib/settings";
@@ -84,6 +85,14 @@ export async function POST(req: Request) {
     if (!site || (tenantId !== null && site.legacyTenantId !== tenantId)) {
       await writeAudit({ actorType: "anonymous", actorLabel: "ip", action: "sales.inquiry.create", resource: "inquiries", result: "denied", requestId, ip, metadata: { reason: "invalid_site_key", tenantId: body.tenantId ?? null } });
       return NextResponse.json({ errors: [{ code: "INVALID_SITE_KEY" }] }, { status: 401 });
+    }
+    // P13 (§12/§13): key-bearing intake must hold CREATE_LEAD on its website
+    // (§394 event map — lead.created requires CREATE_LEAD; migration 049
+    // seeded existing integrations). Keyless legacy embeds are unaffected.
+    const leadCapable = await websiteHasCapability(site.websiteId, "CREATE_LEAD");
+    if (!leadCapable) {
+      await writeAudit({ actorType: "anonymous", actorLabel: "ip", action: "sales.inquiry.create", resource: "inquiries", result: "denied", requestId, ip, metadata: { reason: "capability_not_granted", websiteId: site.websiteId, capability: "CREATE_LEAD" } });
+      return NextResponse.json({ errors: [{ code: "CAPABILITY_NOT_GRANTED" }] }, { status: 403 });
     }
     websiteId = site.websiteId;
     tenantId = site.legacyTenantId;

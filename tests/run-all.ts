@@ -84,6 +84,9 @@ const files = [
   "tests/sales-tests.ts",
   // Phase 13 suite (analytics + strategy workforce)
   "tests/analytics-tests.ts",
+  // Phase 14 suite (roadmap P13 — website connectors: onboarding wizard,
+  // live capability grants, site isolation, channels retirement)
+  "tests/onboarding-tests.ts",
 ];
 let failures = 0;
 for (const f of files) {
