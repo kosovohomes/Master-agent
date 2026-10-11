@@ -164,3 +164,27 @@ Verified at three levels: (1) `migrations-tests` asserts ledger order/checksums 
 ---
 
 **STOP — Phase 1 is complete. Phase 2 has not been started and awaits owner review and approval.**
+
+---
+
+## 31. ADDENDUM (2026-10-11) — Phase 1 conformance re-verification at Phase 13 state
+
+**Context.** The owner re-issued the Phase 1 implementation mandate after the platform had advanced to Phase 13. Per the approved reconciliation (§12 is the controlling Phase 1 baseline), this addendum records a fresh conformance audit of the CURRENT implementation against §12.1–§12.8, executed at HEAD `88cfc56` with the live production deployment — not new Phase 1 construction. **No Phase 1 code gap was found; nothing outside Phase 1 scope was changed.** All Phase 1 modules (§12.2), all exact APIs (§12.4), the auth model (§12.5), and the RBAC model (§12.6) were re-verified present and enforced in source; the legacy sessionStorage admin surface remains deleted.
+
+**Fresh acceptance evidence (§12.8), executed live against production (`masteragent-nine.vercel.app`) on 2026-10-11:**
+
+| # | Criterion | Result | Evidence (this date) |
+|---|---|---|---|
+| 1 | Unauth mutations → 401/403; flood → 429 | **PASS with caveat** | 12-endpoint unauth sweep (incl. all §12.4 mutations + later-phase routes): every request fail-closed (401/403/405). Live 429s did not reproduce: the chat flood never tripped 429 because each request consumes the full LLM-failure latency (OpenAI balance blocker), rolling the 60 s window; the login flood stayed under the per-IP bucket across serverless instances — the documented per-instance limiter limitation (§27.1), code- and CI-test-verified bucket semantics. The DB-backed daily cap is global by construction. |
+| 2 | Two users demonstrate different allowed actions | **PASS** | Production had exactly one user (owner, id 1). A temporary reviewer (id 2) was created via `POST /api/admin/users`, then demonstrated live: reviewer `GET /api/admin/users` → 403, `POST /api/admin/websites` → 403, `GET /api/admin/drafts` → 200 (scoped, empty); owner `GET /api/admin/users` → 200. The reviewer was then disabled via `PATCH` and its session verified destroyed (401). Both accounts' actions are in `audit_logs` with actor ids. |
+| 3 | Two BUs + two websites configurable, zero code changes | **PASS** | Second BU ("P1 Acceptance Holdings", id 2) and website ("p1-acceptance.example.com", id 2) created through the guarded APIs, then updated (`status → inactive` — invalid values correctly rejected with 400 `INVALID_STATUS`). Production now manages 2 BUs / 2 websites entirely as configuration rows. |
+| 4 | Widget still resolves `acme-homes` (491) | **PASS** | `GET /api/v1/widget/config?tenant=acme-homes` → 200; `?tenant=491` → 200. Legacy contract unbroken through 13 phases. |
+| 5 | Ordered ledger; runner re-run is a no-op | **PASS** | `POST /api/admin/migrate` → `noop:true`, `applied:[]`, `skipped:49`, ledger size 49 (000–049, Phase 2–13 versions appended additively on the Phase 1 runner), legacy tables 11/11. |
+| 6 | Every admin mutation in `audit_logs` with user id | **PASS** | 60 recent rows: 60/60 carry actor identity; every mutation from this verification (bu.create, website.create, website.update, users.create, users.set_status) is attributed to `actor_type:user, actor_id:1`; `users.create` metadata shows `generatedPassword:"[redacted]"` (secret redaction verified at write time). |
+| 7 | GitHub Actions green | **PASS (record) / re-run pending** | Typecheck and production build re-executed locally at `88cfc56`: both clean. The 54-suite ephemeral-Postgres run cannot execute in this sandbox (no Postgres/Docker); the validation gate is CI, where the last recorded run (23bb5d3, 54 suites) was green, and this addendum's docs commit re-triggers the pipeline. Live CI-status re-query was blocked by GitHub API IP rate limiting from this sandbox. |
+| 8 | Staging environment exists | **UNRESOLVED (owner-side)** | Unchanged since the original report (§29.3): `docs/STAGING.md` defines the procedure; activation requires the owner's Neon-branch + Vercel-project account actions and cannot be performed or verified from the implementation sandbox. |
+
+**§29 unresolved issues — status update:** (1) production owner account: **resolved** (owner exists and authenticates). (2) OpenAI billing: **still blocking LLM-touching acceptance runs** — production chat currently returns the designed 500 `CHAT_FAILED` envelope after the gateway ledger records the provider error; the approved free-provider remedy (Gemini activation, `LLM_PROVIDER=gemini` + `GEMINI_API_KEY`) is prepared and awaiting owner-provided credentials + a scope-valid Vercel token. (3) staging: unresolved, owner-side (above). (4) branch protection: recommended, owner-side. (5) credential rotation: standing.
+
+**Scope discipline note.** The owner mandate ("implement ONLY the approved Phase 1 scope") was executed as *conformance verification + acceptance evidence + this documentation update*, because Phase 1 construction was completed and reported in §1–§30 and later phases (2–13) are built on top of it and were deliberately left untouched. No Phase 2+ feature was added, modified, or reverted. Production data changes made as acceptance evidence: one temporary reviewer user (created then disabled), one BU + one website configuration row (website set inactive). No client records, integrations, or publishing behavior were touched; nothing was published; no autonomous external communication occurred.
+
