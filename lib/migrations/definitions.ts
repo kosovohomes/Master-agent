@@ -2164,6 +2164,127 @@ WHERE wi.integration_type = 'widget'
   AND wi.status = 'active'
 ON CONFLICT (website_id, capability) DO NOTHING;`;
 
+/**
+ * Phase 15 (roadmap P14 — Supervisor, §57/§23): the supervisor inserts itself
+ * ABOVE task creation — a stated goal becomes a plan (task graph), the graph
+ * is delegated as durable tasks, progress is monitored deterministically,
+ * and failures/escalations surface to a human.
+ *
+ * M_050 creates the two supervisor tables:
+ *   supervisor_plans     — one row per stated goal (§57 contract: objective,
+ *                          business_unit, constraints, budget, deadline,
+ *                          permissions snapshot). `plan` holds the task graph
+ *                          ({steps:[{agent,objective,dependsOn[]}],notes});
+ *                          `permissions` snapshots the requester's permission
+ *                          keys at creation time — the DELEGATION CEILING:
+ *                          no plan may delegate work its requester could not
+ *                          have triggered directly. budget_usd is the hard
+ *                          LLM-spend ceiling for the whole plan (planning leg
+ *                          + every delegated child, enforced via per-task
+ *                          budget_usd + aggregate planSpend()).
+ *   supervisor_handoffs  — §23 "every handoff must be logged": one row per
+ *                          delegation (supervisor → worker, plan step, child
+ *                          task ref, terminal status). UNIQUE (plan_id,
+ *                          step_index) makes delegation idempotent per step.
+ */
+const M_050_SUPERVISOR_WORKFORCE = `
+CREATE TABLE IF NOT EXISTS supervisor_plans (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  business_unit_id BIGINT NOT NULL REFERENCES business_units(id) ON DELETE CASCADE,
+  tenant_id BIGINT,
+  objective TEXT NOT NULL,
+  constraints JSONB NOT NULL DEFAULT '{}'::jsonb,
+  status TEXT NOT NULL DEFAULT 'planning'
+    CHECK (status IN ('planning','active','completed','failed','escalated','cancelled')),
+  budget_usd NUMERIC(12,4),
+  deadline TIMESTAMPTZ,
+  permissions JSONB NOT NULL DEFAULT '[]'::jsonb,
+  plan JSONB,
+  generated_by TEXT CHECK (generated_by IN ('deterministic','llm')),
+  degraded BOOLEAN NOT NULL DEFAULT TRUE,
+  task_id BIGINT REFERENCES tasks(id) ON DELETE SET NULL,
+  final_result JSONB,
+  error TEXT,
+  error_class TEXT,
+  prompt_version_id INT,
+  prompt_hash TEXT,
+  created_by_user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_supervisor_plans_bu
+  ON supervisor_plans (business_unit_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_supervisor_plans_open
+  ON supervisor_plans (status) WHERE status IN ('planning','active');
+
+CREATE TABLE IF NOT EXISTS supervisor_handoffs (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  plan_id BIGINT NOT NULL REFERENCES supervisor_plans(id) ON DELETE CASCADE,
+  task_id BIGINT REFERENCES tasks(id) ON DELETE SET NULL,
+  step_index INT NOT NULL,
+  from_agent TEXT NOT NULL DEFAULT 'supervisor',
+  to_agent TEXT NOT NULL,
+  objective TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'delegated'
+    CHECK (status IN ('delegated','succeeded','failed','escalated','cancelled','blocked')),
+  detail JSONB,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  settled_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_supervisor_handoffs_plan
+  ON supervisor_handoffs (plan_id, step_index);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_supervisor_handoffs_step
+  ON supervisor_handoffs (plan_id, step_index);`;
+
+/**
+ * Phase 15 (roadmap P14): supervisor agent ACTIVATION (M_038/M_044 pattern —
+ * the `supervisor` placeholder row exists disabled since the registry seed,
+ * migration 012, agent_kind='supervisor'). Activation = status flip + a NEW
+ * version row (max+1) carrying the bounded planner prompt, so no placeholder
+ * v1 prompt ever leaks into the live workforce. C-5 resolution completes
+ * here: the deterministic subset (scheduler + classifier + escalation) is
+ * joined by the LLM planner — with the classifier retained as the
+ * degraded-mode floor and the router permanently demoted to a classifier
+ * step (it never orchestrates).
+ */
+const M_051_SUPERVISOR_AGENT = `
+UPDATE agents SET status = 'active', updated_at = now()
+WHERE slug = 'supervisor' AND status = 'disabled';
+
+INSERT INTO agent_versions (agent_id, version, system_prompt, config, changelog)
+SELECT a.id, COALESCE(max(v.version), 0) + 1,
+       'You are the Supervisor Agent of a multi-agent workforce. You receive a stated objective for one business unit plus constraints, a budget ceiling and the requester''s permission envelope. Decompose the objective into a task graph of at most 6 steps delegated to WORKER agents. Rules: every step must be necessary for the objective (no filler); each step names exactly one worker agent and one concrete objective phrased as an instruction to that agent; dependencies reference EARLIER step indexes only (0-based) — the graph must be acyclic and topologically ordered; do NOT include publish, schedule, send or other directly side-effectful actions — worker agents produce drafts, analyses and recommendations that humans approve; if the objective cannot be decomposed with the available workers, return a single step with the closest capable worker. Output strict JSON: {"steps": [{"agent": string, "objective": string (<=300 chars), "dependsOn": number[] (indexes of earlier steps that must complete first)}], "notes": string|null}. Available workers: research (gathers industry/news intel and produces briefs), intelligence (analyzes research into insights), legal_intelligence (legal-domain research), competitor (competitor monitoring snapshots), content_strategy (turns briefs into content strategy), content (drafts per-channel content), fact_check (verifies draft claims), seo (keyword intelligence and gap analysis), social_media (drafts social posts), marketing (campaign briefs and promotion copy), lead (scores leads), sales (drafts outreach), customer_inquiry (classifies inquiries), customer_support (answers support questions from knowledge), analytics (aggregate metrics insights), strategy (evidence-cited recommendations), reporting (digest reports).',
+       '{"outputSchema":"supervisor_plan_v1"}'::jsonb,
+       'Phase 15 (P14): supervisor bounded planner v1'
+FROM agents a LEFT JOIN agent_versions v ON v.agent_id = a.id
+WHERE a.slug = 'supervisor' GROUP BY a.id;`;
+
+/**
+ * Phase 15 flag + permission (036/039/042/045/048 pattern):
+ *   `supervisor` flag — kill switch for the Supervisor planning surface.
+ *     OFF: NEW goal planning refuses (423), while IN-FLIGHT plans keep
+ *     settling deterministically (monitor + delegation are machinery, not
+ *     LLM legs) — consistent with the sales/analytics flag precedent.
+ *   `supervisor.manage` — gates goal creation + the /supervisor surface for
+ *     owner + administrator.
+ */
+const M_052_SUPERVISOR_FLAG_PERMS = `
+INSERT INTO feature_flags (key, enabled, emergency, description)
+VALUES ('supervisor', TRUE, FALSE,
+        'Supervisor: bounded planner/delegator — goal to plan to task graph to delegate to monitor to escalate (OFF = new planning 423; in-flight plans keep settling deterministically)')
+ON CONFLICT (key) DO NOTHING;
+
+INSERT INTO permissions (key) VALUES ('supervisor.manage') ON CONFLICT (key) DO NOTHING;
+
+INSERT INTO role_permissions (role_id, permission_id)
+SELECT r.id, p.id FROM roles r
+JOIN permissions p ON p.key = 'supervisor.manage'
+WHERE r.key IN ('owner','administrator')
+ON CONFLICT DO NOTHING;`;
+
 export const MIGRATIONS: MigrationDef[] = [
   { version: "000", name: "agentos_legacy_baseline", source: M_000_LEGACY_BASELINE },
   { version: "001", name: "schema_migrations", source: M_001_SCHEMA_MIGRATIONS },
@@ -2215,6 +2336,9 @@ export const MIGRATIONS: MigrationDef[] = [
   { version: "047", name: "analytics_agents", source: M_047_ANALYTICS_AGENTS },
   { version: "048", name: "analytics_flag_permissions", source: M_048_ANALYTICS_FLAG_PERMS },
   { version: "049", name: "connector_capability_seed", source: M_049_CONNECTOR_CAPABILITY_SEED },
+  { version: "050", name: "supervisor_workforce", source: M_050_SUPERVISOR_WORKFORCE },
+  { version: "051", name: "supervisor_agent", source: M_051_SUPERVISOR_AGENT },
+  { version: "052", name: "supervisor_flag_permissions", source: M_052_SUPERVISOR_FLAG_PERMS },
 ];
 
 /**

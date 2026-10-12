@@ -32,6 +32,7 @@ import { registerSocialHandlers } from "../social/tasks";
 import { registerMarketingHandlers } from "../marketing/tasks";
 import { registerSalesHandlers } from "../sales/tasks";
 import { registerAnalyticsHandlers } from "../analytics/tasks";
+import { registerSupervisorHandlers } from "../supervisor/tasks";
 import { dispatch, getTenantConfig } from "../agents/dispatch";
 import { routeAgent } from "../agents/core";
 import type { AgentGoal } from "../agents/types";
@@ -399,6 +400,13 @@ export function registerBuiltins(): void {
     }
     return builtinLlm;
   });
+  // Phase 15 (P14): supervisor — the PLANNING leg rides the gateway with
+  // per-task attribution (purpose="supervisor") so budget ceilings and the
+  // llm_requests ledger cover it like every other LLM leg. Delegation legs
+  // attribute to their own child tasks (purpose="draft_generation", the
+  // worker agents' own attribution), each capped by the plan's remaining
+  // budget via tasks.budget_usd.
+  registerSupervisorHandlers(builtinLlm);
 }
 
 // Test seam: override the LLM client used by the builtin agent_dispatch.

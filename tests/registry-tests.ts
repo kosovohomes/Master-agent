@@ -66,9 +66,12 @@ try {
   const activated13 = ["analytics", "strategy", "reporting"];
   check("Phase 13 analytics trio activated (migration 047)",
     activated13.every((s) => agents.find((a) => a.slug === s)?.status === "active"));
-  check("remaining 1 future-workforce placeholder still disabled (supervisor)",
-    placeholders.filter((s) => !activated7.includes(s) && !activated8.includes(s) && s !== "seo" && s !== "social_media" && !activated12.includes(s) && !activated13.includes(s)).every((s) => agents.find((a) => a.slug === s)?.status === "disabled"));
-  check("registry has 19 rows (4 active + 3 Phase 7 + 3 Phase 8 + 1 Phase 9 + 1 Phase 10 + 3 Phase 12 + 3 Phase 13 + 1 placeholder)", agents.length === 19, `n=${agents.length}`);
+  const activated15 = ["supervisor"];
+  check("Phase 15 supervisor agent activated (migration 051, roadmap P14)",
+    activated15.every((s) => agents.find((a) => a.slug === s)?.status === "active"));
+  check("no future-workforce placeholder remains — every registry agent is active (P14 complete)",
+    placeholders.every((s) => agents.find((a) => a.slug === s)?.status === "active"));
+  check("registry has 19 rows (4 active + 3 Phase 7 + 3 Phase 8 + 1 Phase 9 + 1 Phase 10 + 3 Phase 12 + 3 Phase 13 + 1 Phase 15 supervisor)", agents.length === 19, `n=${agents.length}`);
 
   // golden prompts: version 1 of each survivor matches the legacy role line
   const golden: Record<string, string> = {

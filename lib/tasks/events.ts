@@ -45,7 +45,9 @@ export type EventName =
   | "sales.escalated"
   | "analytics.report_ready"
   | "analytics.report_failed"
-  | "analytics.recommendation";
+  | "analytics.recommendation"
+  | "supervisor.plan_completed"
+  | "supervisor.plan_escalated";
 
 /** v1 notification policy: which events page ops, and what the subject says. */
 const RULES: Record<EventName, { subject: (p: Record<string, unknown>) => string } | null> = {
@@ -120,6 +122,15 @@ const RULES: Record<EventName, { subject: (p: Record<string, unknown>) => string
   "analytics.report_ready": null,
   "analytics.report_failed": null,
   "analytics.recommendation": null,
+  // Phase 15 (P14): supervisor — a COMPLETED plan is /supervisor-screen
+  // traffic (silent in v1; the delegated work's own task events already
+  // cover failures). An ESCALATED plan pages ops: a delegated step failed
+  // or a ceiling (budget/permission/deadline) fired — a human decides what
+  // happens to the remaining graph.
+  "supervisor.plan_completed": null,
+  "supervisor.plan_escalated": {
+    subject: (p) => `Supervisor plan #${p.planId} escalated (${p.reason}) — needs a human`,
+  },
 };
 
 async function opsEmail(): Promise<string | null> {

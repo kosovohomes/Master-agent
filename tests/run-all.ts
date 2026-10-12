@@ -87,6 +87,9 @@ const files = [
   // Phase 14 suite (roadmap P13 — website connectors: onboarding wizard,
   // live capability grants, site isolation, channels retirement)
   "tests/onboarding-tests.ts",
+  // Phase 15 suite (roadmap P14 — supervisor: bounded planner/delegator,
+  // §23 handoff logging, budget + permission ceilings, escalation law)
+  "tests/supervisor-tests.ts",
 ];
 let failures = 0;
 for (const f of files) {

@@ -50,6 +50,8 @@ export interface TaskRow {
   started_at: Date | null;
   finished_at: Date | null;
   cancel_requested: boolean;
+  /** Lifetime LLM-spend ceiling (SEC-L9); null = uncapped. Phase 15: supervisor plans/children. */
+  budget_usd: string | null;
   created_by: string;
   idempotency_key: string | null;
   created_at: Date;
@@ -82,6 +84,13 @@ export interface SpawnTaskParams {
   workflowRunId?: number | null;
   /** Delay before the task becomes claimable (scheduled work). */
   runAt?: Date;
+  /**
+   * Lifetime LLM-spend ceiling for this task (SEC-L9 §26). Enforced by
+   * checkBudgets on every gateway call attributed to the task. Phase 15:
+   * the supervisor's planning leg and each delegated child carry their
+   * plan's (remaining) ceiling.
+   */
+  budgetUsd?: number | null;
 }
 
 export interface SpawnTaskResult {

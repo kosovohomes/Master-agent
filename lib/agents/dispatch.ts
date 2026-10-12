@@ -59,6 +59,13 @@ function currentModel(): string {
  * carries full attribution (agent_id, business_unit_id, prompt_version_id,
  * real prompt_hash, model, timing, failure class). Flipping any enablement
  * layer propagates to behavior within one run, zero deploys.
+ *
+ * Phase 15 (P14): `opts.forceAgent` executes a SPECIFIC agent, bypassing the
+ * keyword router — the supervisor's delegation path. The router stays a
+ * classifier (C-16) and never orchestrates; the registry runnability layers
+ * (status × per-BU × kill-switch) still apply to forced agents. `opts.trigger`
+ * labels the run record's trigger column (default "manual"; the supervisor
+ * writes "supervisor").
  */
 export async function dispatch(
   ctx: {
@@ -78,11 +85,14 @@ export async function dispatch(
       topK?: number;
     }) => Promise<KnowledgeCitation[]>;
   },
-  goal: AgentGoal
+  goal: AgentGoal,
+  opts: { forceAgent?: string; trigger?: string } = {}
 ): Promise<DispatchResult> {
   const route = routeAgent(goal);
+  const agentSlug = opts.forceAgent ?? route.agent;
+  const trigger = opts.trigger ?? "manual";
 
-  if (route.agent === "customer_service") {
+  if (agentSlug === "customer_service") {
     // Chat answers are executed by the public chat route; dispatch only
     // records the run (legacy behavior preserved). prompt_hash is NOT NULL
     // in the legacy schema: attribute the run to the agent's canonical
@@ -90,7 +100,7 @@ export async function dispatch(
     const csAgent = await getAgentBySlug("customer_service");
     const csVersion = csAgent ? await currentVersion(csAgent.id) : null;
     const run = await recordRun({
-      tenantId: goal.tenantId, agent: "customer_service", trigger: "manual",
+      tenantId: goal.tenantId, agent: "customer_service", trigger,
       promptHash: promptHash(csVersion?.systemPrompt ?? "unattributed-failure"),
       agentId: csAgent?.id ?? null,
       promptVersionId: csVersion?.id ?? null,
@@ -100,10 +110,10 @@ export async function dispatch(
   }
 
   const businessUnitId = await buIdForLegacyTenant(goal.tenantId);
-  const runnable = await checkRunnable(route.agent, businessUnitId);
+  const runnable = await checkRunnable(agentSlug, businessUnitId);
   if (!runnable.ok) throw new AgentNotRunnableError(runnable.code);
 
-  const agent = await getAgentBySlug(route.agent);
+  const agent = await getAgentBySlug(agentSlug);
   if (!agent) throw new AgentNotRunnableError("AGENT_NOT_FOUND");
   const version = await currentVersion(agent.id);
 
@@ -186,7 +196,7 @@ export async function dispatch(
       agent: agent.slug,
       agentId: agent.id,
       businessUnitId,
-      trigger: "manual",
+      trigger,
       status: "completed",
       promptHash: promptHash(out.systemPrompt),
       promptVersionId: version?.id ?? null,
@@ -208,7 +218,7 @@ export async function dispatch(
         [run.runId, totals.promptTokens, totals.completionTokens, totals.costUsd]
       ).catch(() => undefined);
     }
-    return { runId: run.runId, agent: agent.slug, routeReason: route.reason, draftId: out.draftId, citations };
+    return { runId: run.runId, agent: agent.slug, routeReason: opts.forceAgent ? `forced:${agent.slug}` : route.reason, draftId: out.draftId, citations };
   } catch (e) {
     const completedAt = new Date();
     // Failed executions are recorded (§71) — the run ledger must show them.
@@ -217,7 +227,7 @@ export async function dispatch(
       agent: agent.slug,
       agentId: agent.id,
       businessUnitId,
-      trigger: "manual",
+      trigger,
       status: "failed",
       // prompt_hash is NOT NULL in the legacy schema — attribute the failure
       // to the agent's canonical prompt hash even when execution never ran.

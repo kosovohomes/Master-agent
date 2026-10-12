@@ -8,6 +8,7 @@ import { tick, triggerWorkflow, settleWorkflowRun } from "@/lib/tasks/engine";
 import { spawnDueKnowledgeFetches } from "@/lib/knowledge/service";
 import { spawnDueResearchRuns } from "@/lib/research/service";
 import { spawnDueReportRuns } from "@/lib/analytics/service";
+import { advanceSupervisorPlans } from "@/lib/supervisor/monitor";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -106,6 +107,19 @@ async function handle(req: Request) {
     }
   }
 
+  // Phase 15 (P14): supervisor plans — deterministic monitor pass (wave
+  // spawning, settlement, escalation propagation). This is machinery, not
+  // an LLM leg: it runs regardless of the `supervisor` flag so IN-FLIGHT
+  // plans keep settling even with planning flag-drilled off. Newly spawned
+  // delegation children are ticked in-request so a dependent step never
+  // waits a full cron day for its predecessor to settle.
+  let supervisorAdvanced: Awaited<ReturnType<typeof advanceSupervisorPlans>> | null = null;
+  let supervisorTick: Awaited<ReturnType<typeof tick>> | null = null;
+  supervisorAdvanced = await advanceSupervisorPlans().catch(() => null);
+  if (supervisorAdvanced && supervisorAdvanced.spawned > 0) {
+    supervisorTick = await tick({ workerId: "cron-supervisor", batch: 10 }).catch(() => null);
+  }
+
   await writeAudit({
     actorType: "system", actorLabel: "cron", action: "publishing.sweep", resource: "drafts",
     result: "success", requestId,
@@ -116,6 +130,8 @@ async function handle(req: Request) {
       researchSpawned: researchSpawned as unknown as Record<string, unknown> | null,
       reportsSpawned: reportsSpawned as unknown as Record<string, unknown> | null,
       reportTick: reportTick as unknown as Record<string, unknown> | null,
+      supervisorAdvanced: supervisorAdvanced as unknown as Record<string, unknown> | null,
+      supervisorTick: supervisorTick as unknown as Record<string, unknown> | null,
     },
   });
   return NextResponse.json({
@@ -128,6 +144,8 @@ async function handle(req: Request) {
       researchSpawned,
       reportsSpawned,
       reportTick,
+      supervisorAdvanced,
+      supervisorTick,
     },
     meta: { requestId },
   });

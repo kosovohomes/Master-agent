@@ -127,7 +127,10 @@ try {
   check("cancel queued → cancelled outright", (await cancelTask(cq.taskId, "suite")).outcome === "cancelled");
   check("cancelled task is terminal for further cancels", (await cancelTask(cq.taskId, "suite")).outcome === "terminal");
 
-  const cr = await spawnTask({ tenantId: tenantA, kind: "noop_probe" });
+  // priority 0 pins the claim: claimNextTask orders priority ASC, so stray
+  // due tasks (ties on next_run_at) can never steal w6's claim from cr —
+  // the probe must be the claimed row or the assertions below race.
+  const cr = await spawnTask({ tenantId: tenantA, kind: "noop_probe", priority: 0 });
   trackTask(cr.taskId);
   await claimNextTask("w6");
   const cancelInflight = await cancelTask(cr.taskId, "suite");
@@ -137,11 +140,12 @@ try {
   check("cancel unknown task → not_found", (await cancelTask(999999999, "suite")).outcome === "not_found");
 
   // ---------- visibility-timeout recovery ----------
-  const stuck = await spawnTask({ tenantId: tenantA, kind: "noop_probe" });
+  // Same priority pin as above: w7/w8 must claim stuck/healthy, not a tie.
+  const stuck = await spawnTask({ tenantId: tenantA, kind: "noop_probe", priority: 0 });
   trackTask(stuck.taskId);
   await claimNextTask("w7");
   await query("UPDATE tasks SET heartbeat_at = now() - interval '10 minutes' WHERE id = $1", [stuck.taskId]);
-  const healthy = await spawnTask({ tenantId: tenantA, kind: "noop_probe" });
+  const healthy = await spawnTask({ tenantId: tenantA, kind: "noop_probe", priority: 0 });
   trackTask(healthy.taskId);
   await claimNextTask("w8");
   const recovered = await recoverStuckTasks();

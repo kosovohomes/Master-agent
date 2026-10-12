@@ -33,9 +33,9 @@ export async function spawnTask(p: SpawnTaskParams): Promise<SpawnTaskResult> {
   const rows = await query<{ id: number; xmin_created: boolean }>(
     `INSERT INTO tasks (
        business_unit_id, tenant_id, kind, payload, priority, max_attempts,
-       idempotency_key, created_by, workflow_run_id, next_run_at
+       idempotency_key, created_by, workflow_run_id, next_run_at, budget_usd
      )
-     VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9, COALESCE($10, now()))
+     VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9, COALESCE($10, now()), $11)
      ON CONFLICT (COALESCE(business_unit_id, 0), idempotency_key)
        WHERE idempotency_key IS NOT NULL
        DO NOTHING
@@ -51,6 +51,7 @@ export async function spawnTask(p: SpawnTaskParams): Promise<SpawnTaskResult> {
       p.createdBy ?? "system",
       p.workflowRunId ?? null,
       p.runAt ?? null,
+      p.budgetUsd != null ? p.budgetUsd.toFixed(4) : null,
     ]
   );
   if (rows.length === 0) {
