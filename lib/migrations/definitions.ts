@@ -2283,7 +2283,20 @@ INSERT INTO role_permissions (role_id, permission_id)
 SELECT r.id, p.id FROM roles r
 JOIN permissions p ON p.key = 'supervisor.manage'
 WHERE r.key IN ('owner','administrator')
-ON CONFLICT DO NOTHING;`;
+ON CONFLICT DO NOTHING;`
+
+/**
+ * Access & Identity Overhaul — federated sign-in identities on users.
+ * provider      — the identity origin ('password' default; 'google' once a
+ *                 Google account is linked or used to provision).
+ * provider_id   — the provider's stable subject (Google `sub`), unique where
+ *                 present. password_hash stays authoritative for password
+ *                 sign-in; '' means the account has no usable password yet.
+ */
+const M_053_AUTH_IDENTITY = `
+ALTER TABLE users ADD COLUMN IF NOT EXISTS provider TEXT NOT NULL DEFAULT 'password';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS provider_id TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS users_provider_id_key ON users (provider_id) WHERE provider_id IS NOT NULL;`;
 
 export const MIGRATIONS: MigrationDef[] = [
   { version: "000", name: "agentos_legacy_baseline", source: M_000_LEGACY_BASELINE },
@@ -2339,6 +2352,7 @@ export const MIGRATIONS: MigrationDef[] = [
   { version: "050", name: "supervisor_workforce", source: M_050_SUPERVISOR_WORKFORCE },
   { version: "051", name: "supervisor_agent", source: M_051_SUPERVISOR_AGENT },
   { version: "052", name: "supervisor_flag_permissions", source: M_052_SUPERVISOR_FLAG_PERMS },
+  { version: "053", name: "auth_identity", source: M_053_AUTH_IDENTITY },
 ];
 
 /**

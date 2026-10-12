@@ -90,6 +90,10 @@ const files = [
   // Phase 15 suite (roadmap P14 — supervisor: bounded planner/delegator,
   // §23 handoff logging, budget + permission ceilings, escalation law)
   "tests/supervisor-tests.ts",
+  // Access & Identity Overhaul suite — Sign-in with Google (OAuth code flow
+  // + PKCE, fail-closed identity resolution, owner allowlist provisioning),
+  // provider advertisement, bearer-guarded account recovery
+  "tests/auth-oauth-tests.ts",
 ];
 let failures = 0;
 for (const f of files) {

@@ -132,6 +132,15 @@ All Bearer-guarded (`Authorization: Bearer <OPS_TOKEN>` or `<ADMIN_PASSWORD>`); 
 | `POST /api/admin/seed` | One-call demo bootstrap: tenant + mapped business unit + website + RAG ingest + a real LLM draft. Optional body `{slug,name,topic,channel,knowledge}`. |
 | `GET /api/admin/env-check` | Runtime env diagnosis: presence + length per variable, never values. `DATABASE_URL` also shows scheme+host. |
 | `POST /api/admin/bootstrap` | **One-time** creation of the first owner user (`{email,password}`); refuses with 409 once any user exists. |
+| `POST /api/admin/recover` | Owner recovery: `{}` lists accounts (no mutation); `{email}` rotates that password (one-time initial password in the response), destroys sessions, clears lockout. |
+
+### Sign-in methods
+
+- **Email + password** at `/login` (SEC-C4 sessions; 7-day sliding cookie).
+- **Sign-in with Google** — OAuth code flow + PKCE, fail-closed until
+  `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` are set (redirect URI:
+  `https://<your-app>/api/auth/oauth/google/callback`); `OWNER_EMAILS`
+  allowlists self-provisioning owners. Full guide: **docs/ACCESS.md**.
 
 ### Fresh-environment recovery sequence
 
@@ -142,7 +151,8 @@ curl -X POST https://<your-app>/api/admin/bootstrap -H "Authorization: Bearer $O
 curl -X POST https://<your-app>/api/admin/seed      -H "Authorization: Bearer $OPS_TOKEN"
 ```
 
-Then open `/login`, sign in with the bootstrap email/password, and manage business units, websites, approvals, audit, and settings from the Command Center.
+Locked out later (or password forgotten)? Use `POST /api/admin/recover` (above) —
+no DB access needed. Then open `/login`, sign in with the bootstrap email/password, and manage business units, websites, approvals, audit, and settings from the Command Center.
 
 ### Cron on Hobby plan
 
