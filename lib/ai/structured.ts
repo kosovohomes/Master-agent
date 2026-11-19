@@ -90,15 +90,47 @@ export function validateAgainstSchema(
   return { ok: errors.length === 0, errors };
 }
 
+/** Find the first balanced {...} or [...] starting at `start`, ignoring braces inside strings. */
+function balancedJsonSlice(text: string, start: number): string | null {
+  const open = text[start];
+  const close = open === "{" ? "}" : "]";
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') { inString = true; continue; }
+    if (ch === open) depth++;
+    else if (ch === close) {
+      depth--;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
+  }
+  return null;
+}
+
 function extractJson(text: string): unknown {
   const trimmed = text.trim();
-  // Tolerate fences and preambles: find the outermost JSON object/array.
-  const candidates = [trimmed];
+  // Models often wrap JSON in prose ("Here is your JSON: {...} Hope this helps.").
+  // Try fenced content first, then the whole text, then a balanced object/array
+  // extracted from the first brace/bracket — which ignores trailing prose.
+  const candidates: string[] = [];
   const fence = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  if (fence) candidates.unshift(fence[1]);
-  const firstBrace = trimmed.search(/[{[]/);
-  if (firstBrace > 0) candidates.push(trimmed.slice(firstBrace));
+  if (fence) candidates.push(fence[1].trim());
+  candidates.push(trimmed);
+  const first = trimmed.search(/[{[]/);
+  if (first >= 0) {
+    const balanced = balancedJsonSlice(trimmed, first);
+    if (balanced) candidates.push(balanced);
+  }
   for (const c of candidates) {
+    if (!c) continue;
     try {
       return JSON.parse(c);
     } catch {

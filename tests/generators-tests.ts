@@ -83,6 +83,8 @@ try {
   });
   const usrRes = lastMessages.find((m) => m.role === "user")?.content ?? "";
   check("context included in user message", usrRes.includes("focus on e-filing adoption"));
+  check("context marked as untrusted data",
+    usrRes.includes("untrusted reference data") && usrRes.includes("<<<CONTEXT>>>") && usrRes.includes("<<<END CONTEXT>>>"));
   const resRow = (await query<{ agent: string; status: string; content: string }>("SELECT agent, status, content FROM drafts WHERE id = $1", [outRes.draftId]))[0];
   check("research draft persisted as research/pending", resRow.agent === "research" && resRow.status === "pending");
   check("research draft stores LLM content verbatim", resRow.content === "Intel brief: courts are digitalizing." && outRes.content === resRow.content);
@@ -133,6 +135,9 @@ try {
   check("broad (long) output still drafts",
     rLong.content.length === 2000 &&
     (await query<{ status: string }>("SELECT status FROM drafts WHERE id = $1", [rLong.draftId]))[0].status === "pending");
+  const longNote = (await query<{ review_notes: string | null }>("SELECT review_notes FROM drafts WHERE id = $1", [rLong.draftId]))[0].review_notes;
+  check("over-limit X draft carries a quality warning",
+    !!longNote && longNote.includes("AUTO-QUALITY") && longNote.includes("280"), String(longNote));
 
   nextContent = "ok";
   const rShort = await generateDraft({ llm: stubLLM }, {
@@ -150,6 +155,8 @@ try {
     rEmpty.content === "" &&
     (await query<{ content: string; status: string }>("SELECT content, status FROM drafts WHERE id = $1", [rEmpty.draftId]))[0].content === "" &&
     (await query<{ status: string }>("SELECT status FROM drafts WHERE id = $1", [rEmpty.draftId]))[0].status === "pending");
+  const emptyNote = (await query<{ review_notes: string | null }>("SELECT review_notes FROM drafts WHERE id = $1", [rEmpty.draftId]))[0].review_notes;
+  check("empty draft carries a quality warning", !!emptyNote && emptyNote.includes("empty content"), String(emptyNote));
 
   // --- tenant scoping: the config passed in is the one injected (tenant A voice, never B's) ---
   nextContent = "tenant A copy";

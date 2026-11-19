@@ -57,6 +57,7 @@ try {
   const sysMsg = JSON.stringify(messagesSeen[0] ?? "");
   check("system prompt is retrieved-only", sysMsg.includes("retrieved passages provided below"), sysMsg.slice(0, 120));
   check("system prompt forbids fabrication", sysMsg.includes("Never invent facts"), sysMsg.slice(0, 120));
+  check("system prompt treats passages as untrusted data", sysMsg.includes("untrusted reference text"), sysMsg.slice(0, 200));
   check("answer passes low temperature", true, "handled by answerChat impl");
 
   // ---------- live path: real retrieve on fresh tenants (stub embed, no API) ----------
@@ -94,6 +95,7 @@ try {
   const outA = await answerChat({ llm: liveLLM, retrieve: mkBoundRetrieve() }, { tenantId: tenantA, question: "What is your refund policy?", config: cfg });
   check("live answer returns grounded result", outA.answer.length > 0);
   check("live prompt embeds tenant A passage text", userMsg().includes("Our refund policy is 30 days"), userMsg().slice(0, 140));
+  check("live prompt delimits untrusted passages", userMsg().includes("<<<PASSAGE>>>") && userMsg().includes("<<<END PASSAGE>>>"));
   check("live sources point at tenant A doc", outA.sources.length === 1 && outA.sources[0].title === "Refund FAQ", JSON.stringify(outA.sources));
   check("live system prompt is retrieved-only", sysMsgLive().includes("retrieved passages provided below"));
   check("complete called exactly once", completeCalls === 1, `calls=${completeCalls}`);

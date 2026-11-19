@@ -83,6 +83,27 @@ const cleanClient: LLMClient = {
 const clean = await completeJSON(cleanClient, [{ role: "user", content: "go" }], schema);
 check("valid first attempt needs no repair", clean.attempts === 1 && clean.repaired === false && turns === 1);
 
+// ---------- prose-wrapped JSON (no repair needed) ----------
+let proseTurns = 0;
+const proseClient: LLMClient = {
+  async complete() {
+    proseTurns++;
+    return 'Sure! Here is the result: {"title":"Hello there","channel":"x","tags":[],"score":0.1,"meta":{"lang":"en"}} Hope this helps.';
+  },
+  async embed() { return []; },
+};
+const prose = await completeJSON(proseClient, [{ role: "user", content: "go" }], schema);
+check("JSON with surrounding prose parses on first attempt", prose.attempts === 1 && proseTurns === 1 && (prose.value as { channel: string }).channel === "x");
+
+const fencedProse: LLMClient = {
+  async complete() {
+    return 'Result:\n```json\n{"title":"Hello there","channel":"facebook","tags":[],"score":0.1,"meta":{"lang":"en"}}\n```\nDone.';
+  },
+  async embed() { return []; },
+};
+const fenced = await completeJSON(fencedProse, [{ role: "user", content: "go" }], schema);
+check("fenced JSON with trailing prose parses on first attempt", fenced.attempts === 1 && (fenced.value as { channel: string }).channel === "facebook");
+
 // ---------- exhaustion ----------
 let always = 0;
 const badClient: LLMClient = {

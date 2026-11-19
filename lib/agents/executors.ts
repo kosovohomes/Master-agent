@@ -18,7 +18,9 @@
  */
 import type { LLMClient } from "../ai/types";
 import { createDraft } from "./approval";
-import { generateDraft, systemPromptFor, channelHint } from "./generators";
+import { generateDraft, systemPromptFor, userPromptFor } from "./generators";
+import { draftQualityWarnings, qualityNote } from "./quality";
+import { query } from "../db";
 
 export interface ExecutorInput {
   tenantId: number;
@@ -92,7 +94,7 @@ export function makeGenericLLMExecutor(p: {
     ].join("\n");
     const messages = [
       { role: "system", content: systemPrompt },
-      { role: "user", content: `${channelHint(input.channel)}\n\nTopic: ${input.topic}${input.context ? `\nContext: ${input.context}` : ""}` },
+      { role: "user", content: userPromptFor(input.channel, input.topic, input.context) },
     ] as const;
     const content = await ctx.llm.complete(messages as never, {
       temperature: 0.7,
@@ -104,6 +106,8 @@ export function makeGenericLLMExecutor(p: {
       channel: input.channel,
       content,
     });
+    const note = qualityNote(draftQualityWarnings(content, input.channel));
+    if (note) await query("UPDATE drafts SET review_notes = $2 WHERE id = $1", [draftId, note]);
     return { draftId, content, systemPrompt };
   };
 }

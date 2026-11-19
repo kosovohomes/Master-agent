@@ -20,7 +20,7 @@ function check(name: string, cond: boolean, detail = "") {
   if (!cond) failures++;
 }
 
-const ROOT = fileURLToPath(new URL("..", import.meta.url)).replace(/\/$/, "");
+const ROOT = fileURLToPath(new URL("..", import.meta.url)).replace(/[\\/]$/, "");
 const ALLOWED_PREFIXES = ["lib/ai/", "lib/llm.ts"];
 const FORBIDDEN = [
   /from\s+["'][^"']*lib\/llm["']/,
@@ -40,7 +40,10 @@ function walk(dir: string, acc: string[] = []): string[] {
 }
 
 const offenders: string[] = [];
-const scanned = walk(ROOT).filter((f) => f.includes("/lib/") || f.includes("/app/"));
+// Normalize Windows separators: walk() returns backslash paths on win32.
+const scanned = walk(ROOT)
+  .map((f) => f.replaceAll("\\", "/"))
+  .filter((f) => f.includes("/lib/") || f.includes("/app/"));
 for (const file of scanned) {
   const rel = file.slice(ROOT.length + 1).replaceAll("\\", "/");
   if (ALLOWED_PREFIXES.some((p) => rel.startsWith(p))) continue;
