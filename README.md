@@ -1,201 +1,180 @@
 # AgentOS
 
-AgentOS is a framework-free agent orchestration core for small-business social/media
-operations. It turns a goal ("cover the FALCON launch", "draft a LinkedIn post about the
-webinar") into agent-generated drafts, runs them through a human approval queue, and
-publishes approved drafts to live channels on a cron sweep. It also powers an embeddable
-customer-service chat widget grounded strictly in each tenant's retrieved content (RAG).
+AgentOS is a social-media and customer-service assistant for small businesses. It is built with Next.js (App Router), Postgres + pgvector, and an OpenAI-compatible LLM client. There is no agent framework: the agents are plain TypeScript functions.
 
-All five agents are plain TypeScript functions — no agent framework dependency. The stack
-is Next.js 16 (App Router) + Postgres/pgvector + the OpenAI-compatible `lib/llm` client.
+In plain terms, it does four things:
+
+1. **Turns a goal into a draft.** You tell it what you need (for example, "write a LinkedIn post about our webinar"). It routes the request to one of five agents and generates a draft.
+2. **Waits for a human.** Drafts sit in an approval queue until someone approves or rejects them.
+3. **Publishes on a schedule.** A cron job picks up approved, scheduled drafts and publishes them to email, X, or LinkedIn.
+4. **Answers website visitors.** An embeddable chat widget answers questions using only content that belongs to that specific customer ("tenant"), and shows its sources.
+
+Around that core there is a durable task queue, an AI gateway with spending limits and a cost ledger, role-based permissions, an audit trail, webhook connectors, social-platform OAuth, and an operations dashboard.
+
+---
 
 ## Quickstart
 
-1. Copy the example env and fill in real values:
+Requires **Node 20+** and **Postgres with the pgvector extension**.
 
-   ```bash
-   cp .env.example .env.local
-   # DATABASE_URL       → your Postgres (pgvector enabled)
-   # OPENAI_API_KEY     → LLM + embeddings provider key
-   # CHANNEL_ENC_KEY    → 32-byte hex string (AES-256-GCM) for channel tokens
-   # ADMIN_PASSWORD     → bearer secret protecting /api/admin/*
-   # CRON_SECRET        → bearer secret protecting /api/agents/sweep
-   # RESEND_API_KEY, EMAIL_FROM, EMAIL_TARGET → email publisher
-   ```
-
-2. Create the schema:
-
-   ```bash
-   npm run migrate
-   ```
-
-3. Run the app:
-
-   ```bash
-   npm run dev
-   ```
-
-   - Admin dashboard (approve/reject/schedule drafts): `/admin`
-   - Widget config endpoint: `GET /api/v1/widget/config?tenant=<slug-or-id>`
-
-4. Run the full test suite (all 14 suites, each in its own process):
-
-   ```bash
-   npm test
-   ```
-
-5. Verify production build before shipping:
-
-   ```bash
-   npm run build
-   ```
-
-Requires Node 20+.
-
-## Architecture
-
-```
-                    ┌────────────────────────────────────────────┐
-                    │ Orchestrator  POST /api/agents/run          │
-                    │   routes a goal to one of five agents       │
-                    └────────────────────────────────────────────┘
-                                          │
-        ┌─────────────────┬──────────────┼──────────────┬─────────────────┐
-   research           marketing        sales       ambassador      customer_service
-   (intel briefs)   (per-channel copy) (outreach,  (awareness copy)  (chat, RAG-grounded,
-                                           leads)                          no drafts)
-        └─────────────────┴──────────────┼──────────────┴─────────────────┘
-                                          │
-                    ┌────────────────────────────────────────────┐
-                    │ Approval queue  (drafts table + admin UI)   │
-                    │   pending → approved → scheduled            │
-                    └────────────────────────────────────────────┘
-                                          │
-                    ┌────────────────────────────────────────────┐
-                    │ Cron sweep  POST /api/agents/sweep (x-cron- │
-                    │   secret) publishes scheduled drafts via    │
-                    │   publishers (email / x / linkedin live;    │
-                    │   instagram / tiktok draft-only in v1)      │
-                    └────────────────────────────────────────────┘
+```bash
+cp .env.example .env.local      # then fill in real values
+npm ci                          # install dependencies
+npm run migrate                 # create/update the database schema
+npm run dev                     # start the app on http://localhost:3000
 ```
 
-- **Orchestrator** — `lib/agents/dispatch.ts` + `lib/agents/core.ts`. Routes each goal by
-  topic/channel heuristics, calls the right generator, records an `agent_runs` row.
-- **Five agents** — `lib/agents/catalog.ts`, `lib/agents/generators.ts`.
-- **Approval queue** — `lib/agents/approval.ts`. A strict FSM:
-  `pending → approved|rejected`, `approved → scheduled`, `scheduled → posted|failed`,
-  `rejected/posted/failed` are dead ends. Every decision writes an `approvals` audit row.
-- **Sweep** — `lib/agents/publishers/index.ts`. Finds `scheduled` drafts, decrypts the
-  channel token, publishes, then marks `posted` + writes an `outbox` row.
-- **Chat** — `lib/agents/chat.ts` + `lib/rag/retrieve.ts`. Embeds the question, retrieves
-  the tenant's chunks by cosine distance, and instructs the LLM to answer **only** from
-  those passages, citing them as `sources`.
+Then:
 
-## Embedding content for a tenant
+- Open `/login` and sign in. The first owner is created either with `POST /api/admin/bootstrap` (using `OPS_TOKEN` or `ADMIN_PASSWORD`) or by signing in with Google when that email is listed in `OWNER_EMAILS`. See `docs/ACCESS.md` for the full recovery and access runbook.
+- The dashboard lives at `/dashboard`, with separate pages for approvals, research, content, marketing, SEO, social, sales, analytics, knowledge, connectors, websites, supervisor, and settings.
+- The public widget configuration endpoint is `GET /api/v1/widget/config?tenant=<id-or-slug>`.
 
-`lib/rag/ingest.ts` exposes `ingestText(ctx, { tenantId, sourceId, title, text })`. Give
-tenants an internal endpoint (or script) that sends their sitemap/uploaded text:
+Verify before shipping:
 
-```ts
-import { llm } from "./lib/llm";
-import { addContentSource, ingestText } from "./lib/rag/ingest";
-
-const src = await addContentSource({ embed: (t) => llm.embed(t) }, {
-  tenantId: 42,
-  kind: "sitemap",
-  ref: "https://client.site/sitemap.xml",
-});
-
-await ingestText({ embed: (t) => llm.embed(t) }, {
-  tenantId: 42,
-  sourceId: src.sourceId,
-  title: "About",
-  url: "https://client.site/about",
-  text: "…markdown or plain text…",
-});
+```bash
+npm test        # 57 suites, each in its own process; needs a live test database
+npm run build   # type-check + production build
 ```
 
-Text is chunked (~800 chars), embedded, and stored as `chunks.embedding` (pgvector).
-Duplicate `sha256` content is skipped. Only the tenant's own chunks are ever retrievable.
+`npm test` refuses to run against a database whose URL contains the production marker; point `DATABASE_URL` at an ephemeral Postgres instance.
 
-## Widget embed
+---
 
-The widget reads its configuration from **attributes on the `<script>` tag**
-(it resolves them via `document.currentScript`), and the chat API requires the
-numeric tenant id — so `data-tenant` must be the tenant **id**, not a slug:
+## Environment variables
+
+Required for a working install:
+
+| Variable | Purpose |
+| --- | --- |
+| `DATABASE_URL` | Postgres connection string (pgvector enabled) |
+| `CHANNEL_ENC_KEY` | 32-byte hex key used to encrypt publishing tokens (AES-256-GCM) |
+| `ADMIN_PASSWORD` | Bearer secret for the ops/bootstrap endpoints |
+| `CRON_SECRET` | Bearer secret protecting `/api/agents/sweep` and `/api/agents/engine/tick` |
+
+Commonly needed:
+
+| Variable | Purpose |
+| --- | --- |
+| `OPENAI_API_KEY` | LLM provider key |
+| `OPENAI_MODEL`, `OPENAI_EMBEDDINGS_MODEL` | Default chat and embedding models |
+| `RESEND_API_KEY`, `EMAIL_FROM`, `EMAIL_TARGET` | Email publisher |
+| `NEXT_PUBLIC_APP_URL` | Public base URL (also used as the OpenRouter HTTP-Referer) |
+| `OPS_TOKEN` | Optional separate ops key; same trust level as `ADMIN_PASSWORD` |
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `OWNER_EMAILS`, `GOOGLE_OAUTH_STATE_SECRET` | Optional "Sign in with Google" |
+
+Optional tuning and providers: `LLM_PROVIDER` (openai/gemini/groq/openrouter/custom), `LLM_BASE_URL`, `LLM_CHAT_MODEL`, `LLM_EMBED_MODEL`, `LLM_FALLBACK_MODELS`, `LLM_TIMEOUT_MS`, `LLM_RATE_PER_MIN`, `DAILY_TENANT_LLM_CAP`, `SEARCH_PROVIDER`, `BRAVE_SEARCH_API_KEY`, `SUPERVISOR_MAX_PLAN_BUDGET_USD`, `CHANNEL_ENC_KEY_ID`, `CHANNEL_ENC_KEY_PREVIOUS`, `CHANNEL_ENC_KEY_PREVIOUS_ID`.
+
+Secrets are never committed. `.env.local` is gitignored and `.env.example` contains placeholders only.
+
+---
+
+## How the pieces fit together
+
+```
+  POST /api/agents/run  ──►  Orchestrator (lib/agents/dispatch.ts)
+                                  │  routes a goal to one agent
+        ┌──────────┬──────────┬──────────┬─────────────┬───────────────┐
+     research   marketing    sales    ambassador   customer_service
+      (briefs)   (copy for   (leads)  (awareness)   (chat only, no
+                  channels)                         drafts)
+        └──────────┴──────────┴──────────┴─────────────┴───────────────┘
+                                  │
+                    Approval queue (drafts table + dashboard)
+                    pending → approved|rejected → scheduled → posted|failed
+                                  │
+              Cron sweep (POST /api/agents/sweep, header x-cron-secret)
+              publishes due drafts through the email / X / LinkedIn publishers
+                                  │
+              Chat widget (POST /api/v1/chat) → tenant-scoped RAG → answer + sources
+```
+
+Key implementation points:
+
+- **Agents and routing** — `lib/agents/catalog.ts`, `generators.ts`, `dispatch.ts`, `core.ts`. Each run is recorded in `agent_runs` with model, prompt version, tokens, and cost.
+- **Approval FSM** — `lib/agents/approval.ts`. Transitions are checked against `STATUS_FLOW` inside a transaction with a row lock; every decision writes an `approvals` audit row.
+- **Sweep and publishing** — `lib/agents/publishers/index.ts`. Instagram and TikTok are draft-only in this version; their scheduled drafts are skipped.
+- **Task engine** — `lib/tasks/`. Durable queue with idempotent spawns, `FOR UPDATE SKIP LOCKED` claims, retries with backoff, visibility-timeout recovery, and workflows.
+- **AI gateway** — `lib/ai/`. One controlled doorway for completions and embeddings: provider routing, fallback models, per-BU rate limits, pre-call budget hard-stops, and a `llm_requests` cost ledger.
+- **RAG** — `lib/knowledge/` and `lib/rag/`. Content is chunked (~800 chars), embedded, and stored in pgvector. Retrieval filters by business unit, website, jurisdiction, agent scope, authority tier, access level, and effective date, and re-applies the filter when hydrating results.
+- **Widget** — `public/widget.js`, a self-contained vanilla-JS embed (no `eval`, no inline handlers). Answers and sources are rendered as text.
+
+---
+
+## Sign-in and permissions
+
+- Password login issues a server-side session cookie (only a hash of the token is stored). "Sign in with Google" is optional and hidden when not configured.
+- Admin and agent routes check RBAC permissions on the server; the UI never decides access.
+- Ops endpoints (`bootstrap`, `migrate`, `seed`, `env-check`, `recover`) use a bearer token (`OPS_TOKEN` or `ADMIN_PASSWORD`).
+- The cron endpoints use `x-cron-secret`.
+- Emergency flags in `system_settings`/`feature_flags` can stop all agent work (`stop_all_agents`), stop publishing (`disable_publishing`), or restore the legacy direct sweep (`legacy_sweep_direct`).
+- `legacy_bearer_auth` allows the old ops/admin bearer on some routes during the transition; turn it off once session-based access is verified.
+
+See `docs/ACCESS.md` and `AGENTOS-RUNBOOK.md` for operator details.
+
+---
+
+## Embedding the chat widget
+
+`data-tenant` is the numeric tenant **id** (not a slug). A site key is optional but recommended; with it, conversations bind to the website that emitted them.
 
 ```html
-<!-- container is optional; the widget injects its own floating UI -->
-<script data-tenant="491" data-brand="Acme Homes" src="https://your-host/widget.js" defer></script>
+<script
+  data-tenant="491"
+  data-brand="Acme Homes"
+  data-site-key="wgt_…"
+  data-base="https://your-host"
+  src="https://your-host/widget.js"
+  defer
+></script>
 ```
 
-`public/widget.js` is a self-contained, CSP-safe vanilla-JS widget (no `eval`, no inline
-handlers, no network calls beyond `POST /api/v1/chat`). It renders the answer plus its
-`sources`.
+Ingestion is done by admins through `/api/admin/knowledge` (source registry) and `/api/admin/knowledge/[id]/fetch`, or in code via `addContentSource` and `ingestText` from `lib/rag/ingest.ts`. Duplicate content (same `sha256`) is skipped.
 
-## API surface
+---
 
-| Endpoint | Auth | Body / params | Purpose |
-|---|---|---|---|
-| `POST /api/v1/chat` | none (public) | `{ tenantId, question }` | RAG-grounded answer + sources |
-| `GET /api/v1/widget/config` | none (public) | `?tenant=<slug-or-id>` | Public widget config: `{ tenantId, brand }` |
-| `POST /api/v1/channels` | session (`website.manage`) or `Authorization: Bearer <ADMIN_PASSWORD\|OPS_TOKEN>` during the flag-gated transition | `{ tenantId, kind, token }` | Wire up a channel token (stored AES-256-GCM encrypted) |
-| `POST /api/agents/run` | session (`agents.run`) or legacy bearer (flag-gated) | `{ tenantId, topic, channel?, context? }` | Orchestrate goal → draft (or chat); per-IP rate limit + per-tenant daily LLM cap |
-| `POST /api/agents/sweep` | `x-cron-secret` | — | Publish due scheduled drafts (run from a cron job) |
-| `POST /api/auth/login` | none (rate-limited + lockout) | `{ email, password }` | Email+password → httpOnly session cookie (scrypt, server-side sessions) |
-| `POST /api/auth/logout` / `GET /api/auth/me` | session cookie | — | End session / read principal |
-| `GET /api/admin/drafts` | session (`drafts.read`, BU-scoped) or legacy bearer | `?tenantId=<digits>&status=` | List drafts |
-| `POST /api/admin/drafts/[id]` | session (`drafts.approve`/`drafts.schedule`) or legacy bearer | `{ action: approve\|reject\|schedule, comment? }` | Drive the approval FSM; reviewer recorded |
-| `GET/POST/PATCH /api/admin/business-units` | session (`bu.manage`; reads for scoped staff) | — | Manage business units |
-| `GET/POST/PATCH /api/admin/websites` | session (`website.manage`) | — | Manage websites |
-| `GET/POST/PATCH /api/admin/users` | session (`users.manage`, owner-only) | — | Invite/disable users, assign roles |
-| `GET/PUT /api/admin/settings` | session (`settings.manage`) | — | Feature flags + emergency stops |
-| `GET /api/admin/audit` | session (`audit.read`) | `?limit=&action=&result=` | Audit trail viewer |
-| `POST /api/admin/bootstrap` | `Authorization: Bearer <OPS_TOKEN\|ADMIN_PASSWORD>` | `{ email, password }` | One-time first owner creation |
-| `POST /api/admin/migrate` / `POST /api/admin/seed` / `GET /api/admin/env-check` | `Authorization: Bearer <OPS_TOKEN\|ADMIN_PASSWORD>` | — | Ops: apply versioned migrations / demo seed / env diagnosis |
+## API surface (summary)
 
-The agreed error contract is `{ errors: [{ code, detail? }] }` with 400/401/404/409/500
-semantics per route. Malformed JSON bodies return `400 INVALID_JSON`.
+| Prefix | Auth | What it covers |
+| --- | --- | --- |
+| `/api/v1/chat`, `/api/v1/widget/config`, `/api/v1/inquiries` | Public, rate-limited | Widget chat, config, and inquiry intake |
+| `/api/auth/*` | Public / session | Login, logout, current user, optional Google OAuth, provider advertisement |
+| `/api/agents/run` | Session (`agents.run`) or legacy bearer | Orchestrate a goal into a draft/run |
+| `/api/agents/sweep`, `/api/agents/engine/tick` | `x-cron-secret` | Publishing sweep and engine worker tick |
+| `/api/admin/*` | Session with RBAC permissions, or ops bearer on ops routes | Drafts, users, business units, websites, settings, audit, budgets, tasks, workflows, knowledge, connectors, research, content, SEO, social, marketing, sales, analytics, supervisor |
+| `/api/integrations/[siteId]/events` | Signed webhook | Connector event intake |
 
-## Security notes
+`POST /api/v1/channels` is **retired** and returns `410 GONE`; credentials are wired through signed webhook connectors and the social OAuth surface instead.
 
-- **No secrets in the repo.** `.env.example` is placeholders only; `.env.local` is
-  gitignored. Channel tokens are **never** stored in plaintext — `lib/channels.ts`
-  encrypts them with AES-256-GCM (`CHANNEL_ENC_KEY`) and the sweep decrypts only at
-  publish time.
-- **Timing-safe compares.** `x-cron-secret` (sweep) and `ADMIN_PASSWORD` (admin auth +
-  login) are compared with `crypto.timingSafeEqual` (`lib/security.ts`), which rejects on
-  length mismatch.
-- **Admin API is behind a bearer token**; the admin UI holds the password in
-  `sessionStorage` for the page session only. `POST /api/admin/drafts/[id]` authorizes
-  **before** parsing the body.
-- **v1 channel wire-up is auth-free by design.** The `/api/admin/*` surface carries the
-  admin bearer; the v1 channel endpoint does not (post-T13 architecture keeps v1 public).
-  **Production should move channel wire-up behind admin auth.** The endpoint does,
-  however, distinguish unknown tenants (FK violation → `404 UNKNOWN_TENANT`) from real
-  failures (`500`, generic `detail: "internal error"`), and never echoes internals.
-- **Internal error details are never echoed** in API responses — 5xx bodies carry a fixed
-  generic `detail`.
-- **Idempotency / at-least-once sweep semantics.** `markPosted`/`markFailed` plus the
-  channel-health flip are not atomic, `approveDraft` does a non-transactional
-  read-then-write transition, and `generateDraft` writes the draft and (for sales) the
-  lead separately. These are intentional "at-least-once / retry-safe leftovers" shapes:
-  a crash can duplicate a lead or a publish attempt, never lose data. A future hardening
-  pass may wrap the FSM transitions and lead insert in transactions and/or make the
-  sweep claim-rows idempotent.
-- **Instagram/TikTok are draft-only.** `sweepDue` skips their scheduled drafts, so they
-  stay `scheduled` until channels go live — they are tracked in `outbox` only once
-  posted/failed. This is plan-mandated for v1 (`lib/agents/publishers/index.ts`).
-- **RAG isolation is tenant-column driven.** Retrieval always filters by
-  `tenant_id`; suspended tenants are not resolvable via the widget endpoint.
+Errors follow `{ "errors": [{ "code", "detail?" }] }` with 400/401/403/404/409/429/500 semantics.
+
+---
+
+## Safety notes
+
+- Channel tokens are stored encrypted with AES-256-GCM and decrypted only at publish time; key rotation is supported via key IDs.
+- Secrets and internal error details are never echoed in API responses; 5xx bodies carry a fixed generic detail.
+- Rate limits are per IP and global across serverless instances; the daily LLM cap is per tenant. AI spending limits are enforced by the gateway before each call.
+- Knowledge fetchers accept only public HTTP(S) URLs. Hostnames are resolved and checked against private, loopback, link-local, and cloud-metadata ranges before every request, including every redirect hop. Reserved test domains are exempt so tests stay hermetic.
+- Publishing is at-least-once: a crash after an external post but before the status write can cause a retry. A future hardening pass can add claim rows and publisher-side idempotency keys.
+
+---
+
+## Tests
+
+`npm test` launches 57 suites, each in its own process, against a real Postgres database (some suites exercise migrations, FSM transitions, and RAG). It includes security suites for auth, OAuth, RBAC, rate limiting, audit, connectors, RAG isolation, publishing, and the external HTTP surfaces.
+
+---
+
+## Project documents
+
+- `docs/ACCESS.md` — sign-in, owner recovery, and access model
+- `AGENTOS-RUNBOOK.md` — operator runbook
+- `docs/STAGING.md` — staging guidance
+- `docs/specs/2026-09-09-agentos-design.md` — original design
+- `docs/PHASE-*-IMPLEMENTATION-REPORT.md` — phase-by-phase implementation history
+- `docs/superpowers/plans/2026-09-09-agentos.md` — original build plan
 
 ## Roadmap
 
-- **v1 (done):** orchestrator + 5 agents, approval queue + admin dashboard, cron sweep,
-  live publishing for email / X / LinkedIn, draft-only for Instagram / TikTok,
-  embeddable chat widget grounded in tenant RAG, public widget-config endpoint,
-  14 integration/security test suites, ENC/DB wiring.
-- **Future:** live Instagram/TikTok publishing, CRM sync (leads → pipeline), auto-reply to
-  mentions/comments, white-labeling the dashboard and widget, tenant upload portal,
-  retry/backoff for failed publishes, transactional FSM + idempotent sweep claims,
-  moving v1 channel wire-up behind admin auth.
+Future work: live Instagram/TikTok publishing, CRM sync for leads, auto-replies to mentions/comments, white-labeling, a tenant upload portal, retry/backoff for failed publishes, transactional FSM + idempotent sweep claims.

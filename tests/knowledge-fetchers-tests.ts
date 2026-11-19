@@ -21,7 +21,7 @@ const stamp = Date.now();
 const sourceIds: number[] = [];
 
 /** Minimal fake fetch: routes URLs to canned responses, records calls. */
-function fakeFetch(routes: Record<string, { status?: number; contentType?: string; body?: string }>) {
+function fakeFetch(routes: Record<string, { status?: number; contentType?: string; body?: string; location?: string; contentLength?: string }>) {
   const calls: string[] = [];
   const impl = async (url: string): Promise<{ ok: boolean; status: number; headers: { get(n: string): string | null }; text: () => Promise<string> }> => {
     calls.push(url);
@@ -30,7 +30,13 @@ function fakeFetch(routes: Record<string, { status?: number; contentType?: strin
     return {
       ok: (route.status ?? 200) >= 200 && (route.status ?? 200) < 300,
       status: route.status ?? 200,
-      headers: { get: (n: string) => (n.toLowerCase() === "content-type" ? (route.contentType ?? "text/html") : null) },
+      headers: { get: (n: string) => {
+        const k = n.toLowerCase();
+        if (k === "content-type") return route.contentType ?? "text/html";
+        if (k === "location") return route.location ?? null;
+        if (k === "content-length") return route.contentLength ?? null;
+        return null;
+      } },
       text: async () => route.body ?? "",
     };
   };
@@ -121,6 +127,41 @@ try {
     let threw4 = "";
     try { await kf.fetchForKind("upload", "anything"); } catch (e) { threw4 = (e as Error).message; }
     check("upload kind not fetchable in v1", threw4.includes("not fetchable"), threw4);
+  }
+
+  // ---- SSRF guard: private targets and redirect hopping are refused ----
+  {
+    const blocked = [
+      "http://127.0.0.1/latest/meta-data/iam/security-credentials/",
+      "http://169.254.169.254/latest/meta-data/",
+      "http://[::1]/admin",
+      "http://10.0.0.5/internal",
+      "http://localhost:8080/admin",
+      "file:///etc/passwd",
+      "http://user:pass@x.example/page",
+    ];
+    for (const bad of blocked) {
+      let msg = "";
+      try { await kf.fetchUrlText(bad); } catch (e) { msg = (e as Error).message; }
+      check(`SSRF blocked: ${bad}`, msg !== "", msg);
+    }
+
+    const { impl: redirectImpl, calls } = fakeFetch({
+      "https://x.example/redirect": { status: 302, location: "http://169.254.169.254/latest/meta-data/" },
+    });
+    const rkf = makeKnowledgeFetcher({ fetchImpl: redirectImpl, timeoutMs: 500 });
+    let redirMsg = "";
+    try { await rkf.fetchUrlText("https://x.example/redirect"); } catch (e) { redirMsg = (e as Error).message; }
+    check("redirect to private IP refused", redirMsg.includes("private IP"), redirMsg);
+    check("redirect hop fetched only the first URL", calls.length === 1, JSON.stringify(calls));
+
+    const { impl: okRedirectImpl, calls: okCalls } = fakeFetch({
+      "https://x.example/start": { status: 301, location: "https://x.example/final" },
+      "https://x.example/final": { body: PAGE("Final", "final content") },
+    });
+    const okf = makeKnowledgeFetcher({ fetchImpl: okRedirectImpl, timeoutMs: 500 });
+    const okDoc = await okf.fetchUrlText("https://x.example/start");
+    check("public redirect still followed", okDoc.title === "Final" && okCalls.length === 2, JSON.stringify(okCalls));
   }
 
   // ---- runSourceFetch roundtrip (real DB) ----

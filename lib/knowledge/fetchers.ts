@@ -20,6 +20,8 @@
  * HTTP is injectable: tests pass a fake fetchImpl; production uses globalThis.fetch.
  */
 import crypto from "node:crypto";
+import { lookup } from "node:dns/promises";
+import net from "node:net";
 
 export interface FetchedDoc {
   title: string;
@@ -108,6 +110,103 @@ function tagContent(xml: string, tag: string): string | null {
   return m?.[1] != null ? decodeEntities(m[1].replace(/<!\[CDATA\[|\]\]>/g, "").trim()) : null;
 }
 
+/* ------------------------------------------------------------------ */
+/* SSRF guard: public HTTP(S) targets only, verified on EVERY hop      */
+/* ------------------------------------------------------------------ */
+
+const MAX_REDIRECTS = 5;
+/** RFC 2606 names that can never identify a real public host. */
+const RESERVED_TEST_HOSTS = new Set(["example.com", "example.org", "example.net"]);
+const RESERVED_TEST_SUFFIXES = [".example", ".test", ".invalid"];
+
+function isPrivateIpv4(ip: string): boolean {
+  const p = ip.split(".").map(Number);
+  if (p.length !== 4 || p.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return true;
+  const [a, b, c] = p;
+  if (a === 0 || a === 10 || a === 127) return true;             // 0/8, 10/8, loopback
+  if (a === 169 && b === 254) return true;                        // link-local / cloud metadata
+  if (a === 172 && b >= 16 && b <= 31) return true;               // 172.16/12
+  if (a === 192 && b === 168) return true;                        // 192.168/16
+  if (a === 100 && b >= 64 && b <= 127) return true;              // CGNAT 100.64/10
+  if (a === 192 && b === 0) return true;                          // IETF assignments / TEST-NET-1
+  if (a === 198 && (b === 18 || b === 19)) return true;            // benchmarking
+  if (a === 198 && b === 51 && c === 100) return true;             // TEST-NET-2
+  if (a === 203 && b === 0 && c === 113) return true;              // TEST-NET-3
+  if (a >= 224) return true;                                      // multicast + reserved
+  return false;
+}
+
+function isPrivateIp(address: string): boolean {
+  const ip = address.replace(/%.*$/, "").toLowerCase();           // strip IPv6 zone id
+  if (net.isIP(ip) === 4) return isPrivateIpv4(ip);
+  if (net.isIP(ip) === 6) {
+    if (ip === "::" || ip === "::1") return true;
+    if (/^f[cd]/.test(ip)) return true;                            // fc00::/7 unique-local
+    if (/^fe[89ab]/.test(ip)) return true;                         // fe80::/10 link-local
+    if (/^ff/.test(ip)) return true;                               // multicast
+    if (/^2001:0?db8/.test(ip)) return true;                        // documentation
+    const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(ip);
+    if (mapped) return isPrivateIpv4(mapped[1]);
+    return false;
+  }
+  return true; // unparseable → fail closed
+}
+
+/**
+ * Assert a fetch target is a normal public web address. Called before EVERY
+ * request, including each redirect hop, so an allow-listed sitemap cannot
+ * redirect the crawler into a private network. Rejects credentials,
+ * non-HTTP(S) schemes, local hostnames and private/link-local IPs (including
+ * cloud metadata endpoints). Reserved test domains skip DNS so hermetic
+ * suites can keep using injected fake fetch implementations.
+ */
+export async function assertPublicFetchUrl(raw: string): Promise<void> {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error(`invalid fetch URL: ${raw}`);
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error(`unsupported fetch scheme: ${url.protocol}`);
+  }
+  if (url.username || url.password) throw new Error("fetch URL must not contain credentials");
+
+  // URL.hostname keeps IPv6 brackets — strip them before IP checks.
+  const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase().replace(/\.$/, "");
+  if (
+    host === "localhost" ||
+    host.endsWith(".localhost") ||
+    host.endsWith(".local") ||
+    host.endsWith(".internal") ||
+    host.endsWith(".home.arpa") ||
+    host === "metadata" ||
+    host === "metadata.google.internal" ||
+    host === "instance-data"
+  ) {
+    throw new Error(`private hostname is not fetchable: ${host}`);
+  }
+
+  if (net.isIP(host)) {
+    if (isPrivateIp(host)) throw new Error(`private IP is not fetchable: ${host}`);
+    return;
+  }
+
+  const reserved = RESERVED_TEST_HOSTS.has(host) || RESERVED_TEST_SUFFIXES.some((s) => host.endsWith(s));
+  if (reserved) return; // test-only names; never resolve publicly
+
+  let addresses: { address: string }[];
+  try {
+    addresses = await lookup(host, { all: true });
+  } catch {
+    throw new Error(`cannot resolve fetch host: ${host}`);
+  }
+  if (addresses.length === 0) throw new Error(`fetch host has no DNS records: ${host}`);
+  for (const a of addresses) {
+    if (isPrivateIp(a.address)) throw new Error(`fetch host resolves to a private address: ${host}`);
+  }
+}
+
 export function makeKnowledgeFetcher(options: FetcherOptions = {}): KnowledgeFetcher {
   const fetchImpl = options.fetchImpl ?? ((url: string, init?: RequestInit) => fetch(url, init));
   const timeoutMs = options.timeoutMs ?? 10_000;
@@ -126,28 +225,46 @@ export function makeKnowledgeFetcher(options: FetcherOptions = {}): KnowledgeFet
   }
 
   async function get(url: string): Promise<string> {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-    try {
-      const res = await fetchImpl(url, {
-        signal: ctrl.signal,
-        redirect: "follow",
-        headers: {
-          "user-agent": `AgentOSKnowledgeBot/1.0 (+${crawlerId})`,
-          accept: "text/html, text/plain, application/xml, text/xml, application/rss+xml, application/atom+xml",
-        },
-      } as RequestInit);
-      if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
-      const ct = res.headers.get?.("content-type") ?? "";
-      if (ct !== "" && !/text\/|xml|json|rss|atom/i.test(ct)) {
-        throw new Error(`unsupported content-type "${ct}" for ${url}`);
+    let current = url;
+    for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+      // Fail closed before EVERY request (including redirects): an external
+      // sitemap or RSS feed must never steer the crawler into a private net.
+      await assertPublicFetchUrl(current);
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+      try {
+        const res = await fetchImpl(current, {
+          signal: ctrl.signal,
+          redirect: "manual", // follow explicitly so each hop is re-validated
+          headers: {
+            "user-agent": `AgentOSKnowledgeBot/1.0 (+${crawlerId})`,
+            accept: "text/html, text/plain, application/xml, text/xml, application/rss+xml, application/atom+xml",
+          },
+        } as RequestInit);
+
+        if (res.status >= 300 && res.status < 400) {
+          const location = res.headers.get?.("location");
+          if (!location) throw new Error(`redirect without Location for ${current}`);
+          current = new URL(location, current).toString();
+          continue;
+        }
+        if (!res.ok) throw new Error(`HTTP ${res.status} for ${current}`);
+        const ct = res.headers.get?.("content-type") ?? "";
+        if (ct !== "" && !/text\/|xml|json|rss|atom/i.test(ct)) {
+          throw new Error(`unsupported content-type "${ct}" for ${current}`);
+        }
+        const declared = res.headers.get?.("content-length");
+        if (declared && /^\d+$/.test(declared) && Number(declared) > maxBytes) {
+          throw new Error(`body exceeds ${maxBytes} bytes for ${current}`);
+        }
+        const body = await res.text();
+        if (body.length > maxBytes) throw new Error(`body exceeds ${maxBytes} bytes for ${current}`);
+        return body;
+      } finally {
+        clearTimeout(timer);
       }
-      const body = await res.text();
-      if (body.length > maxBytes) throw new Error(`body exceeds ${maxBytes} bytes for ${url}`);
-      return body;
-    } finally {
-      clearTimeout(timer);
     }
+    throw new Error(`too many redirects for ${url}`);
   }
 
   async function fetchUrlText(url: string): Promise<FetchedDoc> {
