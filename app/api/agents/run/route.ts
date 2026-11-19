@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { dispatch, getTenantConfig, AgentNotRunnableError } from "@/lib/agents/dispatch";
+import { buIdForLegacyTenant } from "@/lib/agents/registry";
 import { ai, BudgetExceededError, LlmProviderError, LlmRateLimitedError } from "@/lib/ai";
 import { hybridRetrieve } from "@/lib/knowledge/retrieve";
 import { sessionOrLegacyBearer } from "@/lib/auth/guards";
@@ -60,9 +61,15 @@ export async function POST(req: Request) {
     // Phase 5: knowledge_v2 ON → research runs ground their briefs in scoped
     // knowledge and the response + run row carry tier'd citations. OFF → the
     // retriever is not passed and dispatch behaves exactly as in Phase 4.
+    // Attribute retrieval embeddings to the tenant's business unit, exactly as
+    // the chat route does. Without this the gateway sees empty attribution, so
+    // budget hard-stops, per-BU rate limits and the cost ledger are skipped
+    // for these embedding calls.
+    const buId = await buIdForLegacyTenant(body.tenantId as number).catch(() => null);
+    const retrievalLlm = ai.withAttribution({ businessUnitId: buId, purpose: "research_grounding" });
     const retrieveKnowledge = (await isFlagEnabled("knowledge_v2", false))
       ? (p: { businessUnitId: number | null; agentSlug: string; query: string; topK?: number }) =>
-          hybridRetrieve(ai, { scope: p, query: p.query, topK: p.topK ?? 5 })
+          hybridRetrieve(retrievalLlm, { scope: p, query: p.query, topK: p.topK ?? 5 })
       : undefined;
     const result = await dispatch({ llm: ai, getConfig: getTenantConfig, retrieveKnowledge }, {
       tenantId: body.tenantId as number,

@@ -74,13 +74,31 @@ export function getPublisher(kind: ChannelKind): Publisher {
 
 export async function sweepDue(ctx: {
   publish(p: PublishInput): Promise<{ externalId: string }>;
-}): Promise<{ posted: number; failed: number }> {
+}): Promise<{ posted: number; failed: number; duplicates_prevented: number }> {
   const due = await query<{ id: number; tenant_id: number; channel: ChannelKind; content: string }>(
-    `SELECT id, tenant_id, channel, content FROM drafts WHERE status = 'scheduled'`
+    `SELECT id, tenant_id, channel, content FROM drafts WHERE status = 'scheduled' ORDER BY id`
   );
-  let posted = 0, failed = 0;
+  let posted = 0, failed = 0, duplicates_prevented = 0;
   for (const d of due) {
     if (d.channel === "instagram" || d.channel === "tiktok") continue; // draft-only channels never auto-post
+
+    // Claim BEFORE the external side effect. The UNIQUE idempotency_key means
+    // only one concurrent sweep can win a draft; the loser moves on instead of
+    // posting twice. markPosted/markFailed finalize this SAME row via
+    // ON CONFLICT DO UPDATE (same "draft:<id>" key used by the engine path).
+    const claim = await query<{ id: number }>(
+      `INSERT INTO content_publications
+         (draft_id, tenant_id, channel, idempotency_key, status, attempted_at)
+       VALUES ($1, $2, $3, $4, 'pending', now())
+       ON CONFLICT (idempotency_key) DO NOTHING
+       RETURNING id`,
+      [d.id, d.tenant_id, d.channel, `draft:${d.id}`]
+    );
+    if (claim.length === 0) {
+      duplicates_prevented++;
+      continue;
+    }
+
     const row = await query<{ token_encrypted: string; target?: string | null; status: string }>(
       "SELECT token_encrypted, status FROM channels WHERE tenant_id = $1 AND kind = $2",
       [d.tenant_id, d.channel]
@@ -100,5 +118,5 @@ export async function sweepDue(ctx: {
       await query("UPDATE channels SET status = 'unhealthy' WHERE tenant_id = $1 AND kind = $2", [d.tenant_id, d.channel]);
     }
   }
-  return { posted, failed };
+  return { posted, failed, duplicates_prevented };
 }

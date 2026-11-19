@@ -169,6 +169,24 @@ try {
     (await query<{ n: string }>("SELECT count(*)::text AS n FROM content_publications WHERE draft_id = $1", [pendId]))[0].n === "0");
 
   // ==================================================================
+  // 5b. overlapping sweeps must never publish the same draft twice
+  // ==================================================================
+  const tRace = await mkTenant("t11-race", "Pub Tenant Race");
+  createdTenantIds.push(tRace);
+  await addChannelsRow(tRace, "x", "x-race-tok");
+  const { draftId: raceId } = await createDraft({ tenantId: tRace, agent: "marketing", channel: "x", content: "race post" });
+  await approveDraft(raceId);
+  await scheduleDraft(raceId);
+
+  const raceSeen: string[] = [];
+  const raceSweep = () => sweepDue({
+    publish(p) { raceSeen.push(p.content); return Promise.resolve({ externalId: "race" }); },
+  });
+  const [raceA, raceB] = await Promise.all([raceSweep(), raceSweep()]);
+  check("overlapping sweeps publish a draft at most once", raceSeen.length === 1, JSON.stringify(raceSeen));
+  check("exactly one sweep reports the publish", raceA.posted + raceB.posted === 1, JSON.stringify({ raceA, raceB }));
+
+  // ==================================================================
   // 6. publish failure -> draft failed, publication failed, channel marked unhealthy
   // ==================================================================
   const tC = await mkTenant("t11-c", "Pub Tenant C");
