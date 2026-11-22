@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { requireSessionUser } from "@/lib/auth/server";
+import { EnginePulse } from "./engine-pulse";
 
 /**
  * Command Center shell (Phase 1 M3): server-side session gate for every
@@ -33,6 +34,7 @@ export default async function DashboardLayout({ children }: { children: React.Re
 
   return (
     <div className="min-h-screen flex" style={{ background: "var(--background)" }}>
+      <EnginePulse />
       <aside className="w-60 shrink-0 flex flex-col" style={{ background: "var(--shell)", color: "var(--shell-foreground)" }}>
         <div className="px-5 py-5">
           <div className="text-lg font-semibold">AgentOS</div>

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { tick } from "@/lib/tasks/engine";
 import { safeEqual } from "@/lib/security";
 import { writeAudit, requestIdFor } from "@/lib/audit";
+import { requirePermission } from "@/lib/auth/guards";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -22,15 +23,22 @@ export const maxDuration = 60;
  */
 async function handle(req: Request) {
   const requestId = requestIdFor(req);
-  const auth = req.headers.get("x-cron-secret");
-  if (!safeEqual(auth, process.env.CRON_SECRET)) {
-    await writeAudit({ actorType: "anonymous", actorLabel: "machine", action: "engine.tick", resource: "tasks", result: "denied", requestId, metadata: { reason: "bad_cron_secret" } });
+  const machine = safeEqual(req.headers.get("x-cron-secret"), process.env.CRON_SECRET);
+  // A signed-in operator with ops.run may also drive the queue. This keeps the
+  // dashboard useful on serverless hosts where an external scheduler is absent.
+  const gate = machine ? null : await requirePermission(req, "ops.run");
+  if (!machine && (!gate || !gate.ok)) {
+    await writeAudit({ actorType: "anonymous", actorLabel: "machine", action: "engine.tick", resource: "tasks", result: "denied", requestId, metadata: { reason: "unauthorized" } });
     return NextResponse.json({ errors: [{ code: "UNAUTHORIZED" }] }, { status: 401 });
   }
 
-  const result = await tick({ workerId: "tick-endpoint", batch: 10 });
+  const result = await tick({ workerId: machine ? "tick-endpoint" : "dashboard-pulse", batch: 10 });
+  const operator = gate && gate.ok ? gate.ctx.user : null;
   await writeAudit({
-    actorType: "system", actorLabel: "machine", action: "engine.tick", resource: "tasks",
+    actorType: machine ? "system" : "user",
+    actorId: machine ? null : operator?.id ?? null,
+    actorLabel: machine ? "machine" : operator?.email ?? "operator",
+    action: "engine.tick", resource: "tasks",
     result: "success", requestId, metadata: { result: result as unknown as Record<string, unknown> },
   });
   return NextResponse.json({ data: result, meta: { requestId } });

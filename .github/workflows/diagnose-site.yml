@@ -8,7 +8,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Verify demo task
+      - name: Pulse engine and verify
         run: |
           set +e
           BASE="https://masteragent-nine.vercel.app"
@@ -16,6 +16,13 @@ jobs:
           curl -sS -m 45 -c /tmp/ck.txt -X POST "$BASE/api/auth/login" \
             -H "Content-Type: application/json" \
             -d '{"email":"wakeelypro@gmail.com","password":"W8SDfQoseXRWKSJXVW"}' > /dev/null
+
+          echo "### PULSE" >> "$S"
+          curl -sS -m 60 -b /tmp/ck.txt -X POST "$BASE/api/agents/engine/tick" \
+            -w '\nHTTP_CODE=%{http_code}\n' >> "$S"
+          echo >> "$S"
+
+          sleep 15
 
           echo "### TASK 92" >> "$S"
           curl -sS -m 45 -b /tmp/ck.txt "$BASE/api/admin/tasks/92" -w '\nHTTP_CODE=%{http_code}\n' >> "$S"
