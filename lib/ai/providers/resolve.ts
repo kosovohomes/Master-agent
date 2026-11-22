@@ -7,7 +7,7 @@
  *
  *   openai      OPENAI_API_KEY                    api.openai.com/v1        (paid, baseline)
  *   gemini      GEMINI_API_KEY (or LLM_API_KEY)   Google AI Studio free tier —
- *                                                 chat (gemini-2.0-flash) AND 1536-dim
+ *                                                 chat (gemini-3.5-flash-lite) AND 1536-dim
  *                                                 embeddings (gemini-embedding-001) —
  *                                                 the recommended free provider: it is
  *                                                 the only free tier covering both
@@ -31,7 +31,7 @@ export interface ResolvedProvider {
 
 export const OPENROUTER_DEFAULT_CHAT_MODEL = "meta-llama/llama-3.3-70b-instruct:free";
 export const GROQ_DEFAULT_CHAT_MODEL = "llama-3.3-70b-versatile";
-export const GEMINI_DEFAULT_CHAT_MODEL = "gemini-2.0-flash";
+export const GEMINI_DEFAULT_CHAT_MODEL = "gemini-3.5-flash-lite";
 export const GEMINI_DEFAULT_EMBED_MODEL = "gemini-embedding-001";
 
 const GROQ_NO_EMBEDDINGS =
