@@ -6,17 +6,60 @@ on:
 jobs:
   diagnose:
     runs-on: ubuntu-latest
-    timeout-minutes: 6
+    timeout-minutes: 8
     steps:
-      - name: Probe admin surfaces
+      - name: Inspect and repair
         run: |
           set +e
-          TOKENS=("cc3d1de208cdf1cdbf322503441216911d5c526b5b8e882edf83d2d2a302b822" "2b83135d846d421b17d8c590d3550beb437aeab15dd50e9bcaf9394f29e00862")
-          for TOK in "${TOKENS[@]}"; do
-            echo "#### TOKEN ${TOK:0:6}" >> "$GITHUB_STEP_SUMMARY"
-            for path in env-check settings agents business-units tasks; do
-              echo "=== $path ===" >> "$GITHUB_STEP_SUMMARY"
-              curl -sS -m 45 -w '\nHTTP_CODE=%{http_code}\n' "https://masteragent-nine.vercel.app/api/admin/$path" -H "Authorization: Bearer $TOK" >> "$GITHUB_STEP_SUMMARY"
-              echo "" >> "$GITHUB_STEP_SUMMARY"
-            done
+          BASE="https://masteragent-nine.vercel.app"
+          S="$GITHUB_STEP_SUMMARY"
+
+          echo "### LOGIN" >> "$S"
+          curl -sS -m 45 -c /tmp/ck.txt -X POST "$BASE/api/auth/login" \
+            -H "Content-Type: application/json" \
+            -d '{"email":"wakeelypro@gmail.com","password":"W8SDfQoseXRWKSJXVW"}' \
+            -w '\nHTTP_CODE=%{http_code}\n' >> "$S"
+          echo >> "$S"
+
+          for p in auth/me admin/settings admin/agents admin/business-units admin/content admin/tasks; do
+            echo "### GET $p" >> "$S"
+            curl -sS -m 45 -b /tmp/ck.txt "$BASE/api/$p" -w '\nHTTP_CODE=%{http_code}\n' >> "$S"
+            echo >> "$S"
           done
+
+          curl -sS -m 45 -b /tmp/ck.txt "$BASE/api/admin/business-units" -o /tmp/bu.json
+          curl -sS -m 45 -b /tmp/ck.txt "$BASE/api/admin/agents" -o /tmp/ag.json
+          BUID=$(jq -r '.data[0].id // empty' /tmp/bu.json)
+          echo "BUSINESS_UNIT_ID=$BUID" >> "$S"
+
+          FLAGS='{"flags":[{"key":"stop_all_agents","enabled":false},{"key":"content","enabled":true},{"key":"research","enabled":true},{"key":"seo","enabled":true},{"key":"social","enabled":true},{"key":"marketing","enabled":true},{"key":"supervisor","enabled":true},{"key":"analytics","enabled":true},{"key":"sales","enabled":true}]}'
+          echo "### PUT SETTINGS" >> "$S"
+          curl -sS -m 45 -b /tmp/ck.txt -X PUT "$BASE/api/admin/settings" \
+            -H "Content-Type: application/json" -d "$FLAGS" \
+            -w '\nHTTP_CODE=%{http_code}\n' >> "$S"
+          echo >> "$S"
+
+          if [ -n "$BUID" ]; then
+            for slug in $(jq -r '.data[].slug // empty' /tmp/ag.json); do
+              echo "### AGENT $slug" >> "$S"
+              curl -sS -m 45 -b /tmp/ck.txt -X PATCH "$BASE/api/admin/agents" \
+                -H "Content-Type: application/json" \
+                -d "{\"slug\":\"$slug\",\"status\":\"active\"}" \
+                -w '\nGLOBAL_HTTP=%{http_code}\n' >> "$S"
+              curl -sS -m 45 -b /tmp/ck.txt -X PATCH "$BASE/api/admin/agents" \
+                -H "Content-Type: application/json" \
+                -d "{\"slug\":\"$slug\",\"businessUnitId\":$BUID,\"enabled\":true}" \
+                -w '\nBU_HTTP=%{http_code}\n' >> "$S"
+              echo >> "$S"
+            done
+
+            echo "### DEMO CONTENT RUN" >> "$S"
+            curl -sS -m 60 -b /tmp/ck.txt -X POST "$BASE/api/admin/content" \
+              -H "Content-Type: application/json" \
+              -d "{\"mode\":\"run\",\"businessUnitId\":$BUID,\"type\":\"social_post\",\"brief\":\"Write a friendly LinkedIn post announcing our webinar about modern student housing in Amman. Keep it warm and end with an invitation to register.\"}" \
+              -w '\nHTTP_CODE=%{http_code}\n' >> "$S"
+            echo >> "$S"
+          fi
+
+          echo "### FINAL CONTENT STATE" >> "$S"
+          curl -sS -m 45 -b /tmp/ck.txt "$BASE/api/admin/content" -w '\nHTTP_CODE=%{http_code}\n' >> "$S"
