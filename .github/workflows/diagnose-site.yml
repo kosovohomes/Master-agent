@@ -1,0 +1,24 @@
+name: Site diagnostic
+
+on:
+  workflow_dispatch:
+    inputs:
+      ops_token:
+        description: "Ops bearer token"
+        required: true
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Probe admin surfaces
+        env:
+          OPS: ${{ inputs.ops_token }}
+        run: |
+          for path in env-check settings agents business-units tasks; do
+            echo "=== $path ===" >> "$GITHUB_STEP_SUMMARY"
+            curl -sS -m 45 "https://masteragent-nine.vercel.app/api/admin/$path" \
+              -H "Authorization: Bearer $OPS" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+          done
