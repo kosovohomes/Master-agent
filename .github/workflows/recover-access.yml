@@ -1,0 +1,37 @@
+name: Admin recovery helper
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "inventory or rotate"
+        required: true
+        default: inventory
+      email:
+        description: "Account email when mode=rotate"
+        required: false
+      ops_token:
+        description: "Ops bearer token"
+        required: true
+
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check site reachability
+        run: |
+          curl -sS -m 30 -o /dev/null -w "site_http=%{http_code}\n" https://masteragent-nine.vercel.app/login
+
+      - name: Call recovery endpoint
+        env:
+          MODE: ${{ inputs.mode }}
+          EMAIL: ${{ inputs.email }}
+          OPS: ${{ inputs.ops_token }}
+        run: |
+          set -e
+          if [ "$MODE" = "inventory" ]; then BODY='{}'; else BODY=$(printf '{"email":"%s"}' "$EMAIL"); fi
+          RESP=$(curl -sS -m 60 -X POST https://masteragent-nine.vercel.app/api/admin/recover \
+            -H "Authorization: Bearer $OPS" -H "Content-Type: application/json" \
+            -d "$BODY" -w '\nHTTP_CODE=%{http_code}')
+          echo "$RESP" >> "$GITHUB_STEP_SUMMARY"
