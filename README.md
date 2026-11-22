@@ -56,7 +56,8 @@ Commonly needed:
 
 | Variable | Purpose |
 | --- | --- |
-| `OPENAI_API_KEY` | LLM provider key |
+| `OPENAI_API_KEY` | LLM provider key (paid baseline) |
+| `GEMINI_API_KEY` | Google AI Studio key for the free Gemini provider |
 | `OPENAI_MODEL`, `OPENAI_EMBEDDINGS_MODEL` | Default chat and embedding models |
 | `RESEND_API_KEY`, `EMAIL_FROM`, `EMAIL_TARGET` | Email publisher |
 | `NEXT_PUBLIC_APP_URL` | Public base URL (also used as the OpenRouter HTTP-Referer) |
@@ -64,6 +65,18 @@ Commonly needed:
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `OWNER_EMAILS`, `GOOGLE_OAUTH_STATE_SECRET` | Optional "Sign in with Google" |
 
 Optional tuning and providers: `LLM_PROVIDER` (openai/gemini/groq/openrouter/custom), `LLM_BASE_URL`, `LLM_CHAT_MODEL`, `LLM_EMBED_MODEL`, `LLM_FALLBACK_MODELS`, `LLM_TIMEOUT_MS`, `LLM_RATE_PER_MIN`, `DAILY_TENANT_LLM_CAP`, `SEARCH_PROVIDER`, `BRAVE_SEARCH_API_KEY`, `SUPERVISOR_MAX_PLAN_BUDGET_USD`, `CHANNEL_ENC_KEY_ID`, `CHANNEL_ENC_KEY_PREVIOUS`, `CHANNEL_ENC_KEY_PREVIOUS_ID`.
+
+### Free AI option (recommended)
+
+Google Gemini has a free tier that covers both chat and embeddings, so it can replace the paid OpenAI key without changing code. In Vercel, add these environment variables and redeploy:
+
+| Variable | Value |
+| --- | --- |
+| `LLM_PROVIDER` | `gemini` |
+| `GEMINI_API_KEY` | Free key from https://aistudio.google.com/apikey |
+| `LLM_CHAT_MODEL` | `gemini-3.5-flash-lite` (optional — already the default) |
+
+`OPENAI_API_KEY` can stay in place; it is ignored while `LLM_PROVIDER=gemini`. Set `LLM_PROVIDER=openai` to switch back. Free tiers have daily limits, and Google's free tier may use prompts to improve its products, so avoid sending private customer data through it.
 
 Secrets are never committed. `.env.local` is gitignored and `.env.example` contains placeholders only.
 
