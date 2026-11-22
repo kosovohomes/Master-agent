@@ -6,60 +6,21 @@ on:
 jobs:
   diagnose:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 5
     steps:
-      - name: Inspect and repair
+      - name: Verify demo task
         run: |
           set +e
           BASE="https://masteragent-nine.vercel.app"
           S="$GITHUB_STEP_SUMMARY"
-
-          echo "### LOGIN" >> "$S"
           curl -sS -m 45 -c /tmp/ck.txt -X POST "$BASE/api/auth/login" \
             -H "Content-Type: application/json" \
-            -d '{"email":"wakeelypro@gmail.com","password":"W8SDfQoseXRWKSJXVW"}' \
-            -w '\nHTTP_CODE=%{http_code}\n' >> "$S"
+            -d '{"email":"wakeelypro@gmail.com","password":"W8SDfQoseXRWKSJXVW"}' > /dev/null
+
+          echo "### TASK 92" >> "$S"
+          curl -sS -m 45 -b /tmp/ck.txt "$BASE/api/admin/tasks/92" -w '\nHTTP_CODE=%{http_code}\n' >> "$S"
           echo >> "$S"
 
-          for p in auth/me admin/settings admin/agents admin/business-units admin/content admin/tasks; do
-            echo "### GET $p" >> "$S"
-            curl -sS -m 45 -b /tmp/ck.txt "$BASE/api/$p" -w '\nHTTP_CODE=%{http_code}\n' >> "$S"
-            echo >> "$S"
-          done
-
-          curl -sS -m 45 -b /tmp/ck.txt "$BASE/api/admin/business-units" -o /tmp/bu.json
-          curl -sS -m 45 -b /tmp/ck.txt "$BASE/api/admin/agents" -o /tmp/ag.json
-          BUID=$(jq -r '.data[0].id // empty' /tmp/bu.json)
-          echo "BUSINESS_UNIT_ID=$BUID" >> "$S"
-
-          FLAGS='{"flags":[{"key":"stop_all_agents","enabled":false},{"key":"content","enabled":true},{"key":"research","enabled":true},{"key":"seo","enabled":true},{"key":"social","enabled":true},{"key":"marketing","enabled":true},{"key":"supervisor","enabled":true},{"key":"analytics","enabled":true},{"key":"sales","enabled":true}]}'
-          echo "### PUT SETTINGS" >> "$S"
-          curl -sS -m 45 -b /tmp/ck.txt -X PUT "$BASE/api/admin/settings" \
-            -H "Content-Type: application/json" -d "$FLAGS" \
-            -w '\nHTTP_CODE=%{http_code}\n' >> "$S"
-          echo >> "$S"
-
-          if [ -n "$BUID" ]; then
-            for slug in $(jq -r '.data[].slug // empty' /tmp/ag.json); do
-              echo "### AGENT $slug" >> "$S"
-              curl -sS -m 45 -b /tmp/ck.txt -X PATCH "$BASE/api/admin/agents" \
-                -H "Content-Type: application/json" \
-                -d "{\"slug\":\"$slug\",\"status\":\"active\"}" \
-                -w '\nGLOBAL_HTTP=%{http_code}\n' >> "$S"
-              curl -sS -m 45 -b /tmp/ck.txt -X PATCH "$BASE/api/admin/agents" \
-                -H "Content-Type: application/json" \
-                -d "{\"slug\":\"$slug\",\"businessUnitId\":$BUID,\"enabled\":true}" \
-                -w '\nBU_HTTP=%{http_code}\n' >> "$S"
-              echo >> "$S"
-            done
-
-            echo "### DEMO CONTENT RUN" >> "$S"
-            curl -sS -m 60 -b /tmp/ck.txt -X POST "$BASE/api/admin/content" \
-              -H "Content-Type: application/json" \
-              -d "{\"mode\":\"run\",\"businessUnitId\":$BUID,\"type\":\"social_post\",\"brief\":\"Write a friendly LinkedIn post announcing our webinar about modern student housing in Amman. Keep it warm and end with an invitation to register.\"}" \
-              -w '\nHTTP_CODE=%{http_code}\n' >> "$S"
-            echo >> "$S"
-          fi
-
-          echo "### FINAL CONTENT STATE" >> "$S"
-          curl -sS -m 45 -b /tmp/ck.txt "$BASE/api/admin/content" -w '\nHTTP_CODE=%{http_code}\n' >> "$S"
+          echo "### RECENT CONTENT ITEMS" >> "$S"
+          curl -sS -m 45 -b /tmp/ck.txt "$BASE/api/admin/content" -o /tmp/c.json
+          jq '[.data.items[] | {id, title, lifecycle, unprocessedReason, createdAt}] | sort_by(.id) | .[-3:]' /tmp/c.json >> "$S"
