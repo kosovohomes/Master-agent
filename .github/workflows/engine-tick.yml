@@ -1,0 +1,33 @@
+name: Engine heartbeat
+
+# The Vercel cron is the guaranteed daily floor (vercel.json -> /api/agents/sweep).
+# This workflow gives the task engine a sub-daily pulse so queued work, retries,
+# supervisor waves and scheduled social posts do not wait a full day.
+# Claims use FOR UPDATE SKIP LOCKED, so overlapping ticks are safe.
+
+on:
+  schedule:
+    # Every 15 minutes. GitHub Actions minimum is 5 minutes; 15 keeps a
+    # private repo inside the free-minute allowance.
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Ping the engine tick endpoint
+        env:
+          TICK_URL: ${{ secrets.AGENTOS_TICK_URL }}
+          CRON_SECRET: ${{ secrets.AGENTOS_CRON_SECRET }}
+        run: |
+          if [ -z "$TICK_URL" ] || [ -z "$CRON_SECRET" ]; then
+            echo "AGENTOS_TICK_URL / AGENTOS_CRON_SECRET not configured; skipping."
+            exit 0
+          fi
+          curl --fail --silent --show-error --max-time 45 \
+            -X POST "$TICK_URL" \
+            -H "x-cron-secret: $CRON_SECRET" \
+            -H "Content-Type: application/json" \
+            -d '{}'

@@ -140,7 +140,7 @@ Ingestion is done by admins through `/api/admin/knowledge` (source registry) and
 | `/api/v1/chat`, `/api/v1/widget/config`, `/api/v1/inquiries` | Public, rate-limited | Widget chat, config, and inquiry intake |
 | `/api/auth/*` | Public / session | Login, logout, current user, optional Google OAuth, provider advertisement |
 | `/api/agents/run` | Session (`agents.run`) or legacy bearer | Orchestrate a goal into a draft/run |
-| `/api/agents/sweep`, `/api/agents/engine/tick` | `x-cron-secret` | Publishing sweep and engine worker tick |
+| `/api/agents/sweep`, `/api/agents/engine/tick` | `x-cron-secret` | Publishing sweep and engine worker tick. The sweep runs daily via `vercel.json`; a GitHub Actions heartbeat ticks the engine every 15 minutes when `AGENTOS_TICK_URL` and `AGENTOS_CRON_SECRET` are configured (see `AGENTOS-RUNBOOK.md`). |
 | `/api/admin/*` | Session with RBAC permissions, or ops bearer on ops routes | Drafts, users, business units, websites, settings, audit, budgets, tasks, workflows, knowledge, connectors, research, content, SEO, social, marketing, sales, analytics, supervisor |
 | `/api/integrations/[siteId]/events` | Signed webhook | Connector event intake |
 

@@ -104,7 +104,7 @@ The seed script: creates tenant `acme-homes` → saves brand voice → ingests k
 1. **Generate:** `POST /api/agents/run` with `{ "tenantId": <id>, "topic": "...", "channel": "linkedin" }`
 2. **Review:** open `/admin` on the deployed URL → log in with `ADMIN_PASSWORD` → paste tenant ID → **Load**
 3. **Approve → Schedule** a draft
-4. **Publish:** automatic daily at 03:30 UTC via cron (`vercel.json`), or force: `POST /api/agents/sweep` with header `x-cron-secret: <CRON_SECRET>`
+4. **Publish:** automatic daily at 03:30 UTC via cron (`vercel.json`), or force: `POST /api/agents/sweep` with header `x-cron-secret: <CRON_SECRET>`. The daily sweep is the guaranteed floor; the engine heartbeat (GitHub Actions, every 15 minutes) keeps queued tasks, retries and scheduled social posts moving between daily sweeps.
 5. **Chat answers:** `POST /api/v1/chat` with `{ "tenantId": <id>, "question": "what is included in every home?" }` (the body key is `question`) → answered strictly from your ingested text, with `sources`
 6. **Widget:** `GET /api/v1/widget/config?tenant=<id>` → embed `public/widget.js` on any site
 
@@ -119,6 +119,20 @@ The seed script: creates tenant `acme-homes` → saves brand voice → ingests k
 | `GET/POST /api/admin/drafts` | session (`drafts.read`, BU-scoped) or legacy bearer | approval queue |
 | `POST /api/admin/drafts/[id]` | session (`drafts.approve`/`drafts.schedule`) or legacy bearer | approve / reject / schedule (reviewer recorded) |
 | `GET/POST /api/agents/sweep` | `x-cron-secret: <CRON_SECRET>` | publish scheduled drafts |
+| `GET/POST /api/agents/engine/tick` | `x-cron-secret: <CRON_SECRET>` | worker heartbeat — claims due tasks, retries, supervisor waves |
+
+### Engine heartbeat setup
+
+`vercel.json` guarantees one sweep per day. For production responsiveness, add
+two repository secrets in GitHub (Settings → Secrets and variables → Actions):
+
+- `AGENTOS_TICK_URL` — `https://<your-domain>/api/agents/engine/tick`
+- `AGENTOS_CRON_SECRET` — the same value as `CRON_SECRET`
+
+The `.github/workflows/engine-tick.yml` workflow then pings that endpoint every
+15 minutes (and can be run manually). If either secret is absent it simply
+skips — no failure, no noise. Overlapping ticks are safe: task claims use
+`FOR UPDATE SKIP LOCKED`.
 
 ---
 
